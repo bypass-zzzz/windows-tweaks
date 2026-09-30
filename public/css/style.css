@@ -985,3 +985,311 @@ input:checked + .slider:before {
 .boot-status {
     margin-top: 12px; font-family: var(--font-mono); font-size: 0.7rem; color: #b8b8c0;
 }
+
+/* ==============================================================================
+   OBSIDIAN — BLACK & RED THEME
+   Second theme, opt-in. Sits alongside the monochrome default above; the
+   selector is [data-theme="obsidian"] on <html> so nothing here leaks into
+   the default palette. Every value is a real red/ember ramp on true black.
+   ============================================================================== */
+
+[data-theme="obsidian"] {
+    --bg-base: #050203;
+    --bg-surface: #0d0507;
+
+    --bg-card: linear-gradient(150deg, rgba(255,45,85,0.10) 0%, rgba(255,45,85,0.02) 100%);
+    --bg-card-hover: linear-gradient(150deg, rgba(255,45,85,0.18) 0%, rgba(255,45,85,0.04) 100%);
+    --bg-card-active: linear-gradient(150deg, rgba(255,45,85,0.24) 0%, rgba(255,45,85,0.06) 100%);
+
+    --border-subtle: rgba(255,60,90,0.14);
+    --border-medium: rgba(255,60,90,0.26);
+    --border-accent: rgba(255,60,90,0.48);
+    --glass-highlight: inset 0 1px 0 rgba(255,110,130,0.22);
+
+    --text-primary: #fff5f6;
+    --text-secondary: #d9a8b0;
+    --text-muted: #8c5f68;
+
+    --accent-cyan: #ff2d55;
+    --accent-cyan-glow: rgba(255,45,85,0.32);
+    --accent-emerald: #ff5c7a;
+    --accent-emerald-glow: rgba(255,92,122,0.22);
+    --accent-violet: #c9184a;
+    --accent-violet-glow: rgba(201,24,74,0.18);
+    --accent-rose: #ff8fa3;
+    --accent-amber: #e01038;
+
+    --mono-white: #ff5c7a;
+    --mono-light: #ffa8b8;
+    --mono-mid: #b35a68;
+    --mono-dark: #4a1f27;
+
+    --gradient-primary: linear-gradient(180deg, #ff6b81 0%, #ff2d55 50%, #c9184a 100%);
+    --gradient-surface: linear-gradient(180deg, #170609 0%, #050203 100%);
+    --gradient-glass: linear-gradient(150deg, rgba(255,45,85,0.20) 0%, rgba(255,45,85,0.05) 50%, rgba(255,45,85,0.10) 100%);
+    --gradient-text: linear-gradient(180deg, #ffd0d8 20%, #ff2d55 100%);
+
+    --shadow-card: 0 20px 60px rgba(0,0,0,0.75), 0 0 0 1px rgba(255,45,85,0.08), 0 1px 0 rgba(255,110,130,0.10) inset;
+    --shadow-glow: 0 0 34px rgba(255,45,85,0.30);
+    --shadow-btn: 0 6px 24px rgba(255,45,85,0.34), 0 1px 0 rgba(255,180,190,0.5) inset;
+}
+
+/* Ambient ember wash — replaces the white radial bloom of the default theme */
+[data-theme="obsidian"] body {
+    background-image:
+        radial-gradient(ellipse 80% 50% at 50% -10%, rgba(255,45,85,0.20) 0%, transparent 62%),
+        radial-gradient(ellipse 60% 40% at 12% 100%, rgba(140,10,35,0.16) 0%, transparent 62%),
+        radial-gradient(ellipse 60% 40% at 88% 100%, rgba(90,6,25,0.14) 0%, transparent 62%),
+        linear-gradient(180deg, #100406 0%, #050203 42%, #000000 100%);
+}
+
+/* Chrome surfaces that hardcode rgba(10,10,12,...) in the base theme */
+[data-theme="obsidian"] .app-header {
+    background: rgba(13, 5, 7, 0.66);
+    border-bottom-color: var(--border-subtle);
+}
+[data-theme="obsidian"] ::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgba(255,45,85,0.42), rgba(255,45,85,0.16));
+}
+[data-theme="obsidian"] ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255,45,85,0.62);
+}
+[data-theme="obsidian"] ::selection {
+    background: rgba(255,45,85,0.85);
+    color: #fff;
+}
+[data-theme="obsidian"] button:focus-visible,
+[data-theme="obsidian"] input:focus-visible {
+    outline-color: rgba(255,45,85,0.75);
+}
+
+/* Badges + primary button: white fills become ember fills */
+[data-theme="obsidian"] .badge-active {
+    background: linear-gradient(180deg, #ff2d55, #c9184a);
+    color: #fff;
+    border-color: rgba(255,140,160,0.5);
+    box-shadow: 0 2px 14px rgba(255,45,85,0.42);
+}
+[data-theme="obsidian"] .badge-warning {
+    background: rgba(255,45,85,0.16);
+    color: #ff8fa3;
+    border-color: rgba(255,45,85,0.34);
+}
+[data-theme="obsidian"] .badge-neutral {
+    background: rgba(255,45,85,0.08);
+    color: var(--text-secondary);
+    border-color: var(--border-subtle);
+}
+[data-theme="obsidian"] .btn-primary {
+    background: var(--gradient-primary);
+    color: #fff;
+    box-shadow: var(--shadow-btn);
+}
+[data-theme="obsidian"] .boot-logo {
+    background: var(--gradient-primary);
+    box-shadow: 0 8px 34px rgba(255,45,85,0.42);
+}
+[data-theme="obsidian"] .boot-title {
+    background: linear-gradient(180deg, #ffd0d8 20%, #ff2d55 100%);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+[data-theme="obsidian"] .boot-fill {
+    background: linear-gradient(90deg, #c9184a, #ff6b81, #ff2d55);
+    box-shadow: 0 0 14px rgba(255,45,85,0.6);
+}
+[data-theme="obsidian"] .boot-bar {
+    background: rgba(255,45,85,0.12);
+}
+
+/* Toggle switches: the base theme hardcodes a white track + white knob, which
+   would read as "on" in a black/red palette even when the row is disabled. */
+[data-theme="obsidian"] .slider {
+    background-color: rgba(255,45,85,0.14);
+    border-color: rgba(255,45,85,0.22);
+}
+[data-theme="obsidian"] .slider:before {
+    background: linear-gradient(180deg, #ffb3c1, #e01038);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+[data-theme="obsidian"] input:checked + .slider {
+    background-color: var(--gradient-primary);
+    border-color: rgba(255,140,160,0.55);
+    box-shadow: 0 0 18px rgba(255,45,85,0.45);
+}
+[data-theme="obsidian"] input:checked + .slider:before {
+    background: #fff;
+    border-color: rgba(255,255,255,0.6);
+}
+
+/* Nav pill and metric icon chips */
+[data-theme="obsidian"] .nav-tab.active {
+    background: var(--gradient-primary);
+    color: #fff;
+    border-color: rgba(255,140,160,0.5);
+    box-shadow: 0 2px 18px rgba(255,45,85,0.40), inset 0 1px 0 rgba(255,190,200,0.55);
+}
+[data-theme="obsidian"] .metric-icon-wrap {
+    background: rgba(255,45,85,0.12);
+    border-color: var(--border-subtle);
+    color: var(--accent-rose);
+}
+[data-theme="obsidian"] .table-wrapper {
+    background: rgba(255,45,85,0.03);
+}
+
+/* Legend explaining the ADVANCED / unverified badges above the catalog */
+.adv-legend {
+    display: flex; flex-direction: column; gap: 8px;
+    padding: 12px 14px; margin-bottom: 14px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    background: rgba(255,255,255,0.03);
+}
+.adv-legend-row {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 0.74rem; line-height: 1.5; color: var(--text-secondary);
+}
+.adv-legend-row .badge { flex: 0 0 auto; }
+.adv-legend-row em { color: var(--text-primary); font-style: normal; font-weight: 600; }
+[data-theme="obsidian"] .adv-legend { background: rgba(255,45,85,0.05); }
+
+/* Tweak guidance callout — the "before you enable" / "note" block under a desc */
+.tweak-caution {
+    margin-top: 7px;
+    padding: 8px 11px;
+    border-radius: 9px;
+    border: 1px solid var(--border-subtle);
+    border-left: 2px solid var(--text-muted);
+    background: rgba(255,255,255,0.035);
+    font-size: 0.73rem;
+    line-height: 1.55;
+    color: var(--text-secondary);
+}
+.tweak-caution-tag {
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-right: 6px;
+}
+
+/* Advanced tweaks get a warmer left edge and a red wash so they read as
+   "look twice" without needing the badge alone to carry that meaning.
+   Uses an inset shadow rather than border-left so the row does not shift 1px. */
+.tweak-item.is-advanced { box-shadow: inset 3px 0 0 -1px var(--accent-amber); }
+.tweak-item.is-advanced .tweak-caution {
+    border-left-color: var(--accent-rose);
+    background: rgba(255,69,58,0.05);
+}
+.tweak-item.is-advanced .tweak-caution-tag { color: var(--accent-rose); }
+[data-theme="obsidian"] .tweak-item.is-advanced { border-left-color: var(--accent-rose); }
+[data-theme="obsidian"] .tweak-item.is-advanced .tweak-caution {
+    background: rgba(255,45,85,0.07);
+    border-color: rgba(255,45,85,0.16);
+    border-left-color: var(--accent-cyan);
+}
+
+/* ==============================================================================
+   MOTION — shared by both themes, so the default palette gains it too
+   ============================================================================== */
+
+/* Slow ember breathing on the header brand badge */
+@keyframes obsidianPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255,45,85,0.00), 0 4px 18px rgba(0,0,0,0.5); }
+    50%      { box-shadow: 0 0 26px 4px rgba(255,45,85,0.38), 0 4px 18px rgba(0,0,0,0.5); }
+}
+[data-theme="obsidian"] .brand-logo-badge {
+    animation: obsidianPulse 3.4s ease-in-out infinite;
+}
+
+/* One-shot lift-in for cards, staggered by DOM order via nth-child */
+@keyframes cardRise {
+    from { opacity: 0; transform: translateY(14px) scale(0.985); }
+    to   { opacity: 1; transform: none; }
+}
+[data-theme="obsidian"] .card {
+    animation: cardRise 0.5s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+[data-theme="obsidian"] .card:nth-of-type(1) { animation-delay: 0.02s; }
+[data-theme="obsidian"] .card:nth-of-type(2) { animation-delay: 0.07s; }
+[data-theme="obsidian"] .card:nth-of-type(3) { animation-delay: 0.12s; }
+[data-theme="obsidian"] .card:nth-of-type(4) { animation-delay: 0.17s; }
+[data-theme="obsidian"] .card:nth-of-type(5) { animation-delay: 0.22s; }
+[data-theme="obsidian"] .card:nth-of-type(6) { animation-delay: 0.27s; }
+
+/* Sheen that sweeps across primary buttons on hover */
+@keyframes sheenSweep {
+    from { transform: translateX(-120%) skewX(-18deg); }
+    to   { transform: translateX(320%) skewX(-18deg); }
+}
+[data-theme="obsidian"] .btn-primary { position: relative; overflow: hidden; }
+[data-theme="obsidian"] .btn-primary::after {
+    content: "";
+    position: absolute; top: 0; bottom: 0; left: 0; width: 40%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.42), transparent);
+    transform: translateX(-120%) skewX(-18deg);
+    pointer-events: none;
+}
+[data-theme="obsidian"] .btn-primary:hover::after { animation: sheenSweep 0.75s ease; }
+
+/* Live pulse on the ping canvas so the 1500ms poll reads as motion */
+@keyframes traceGlow {
+    0%, 100% { opacity: 0.6; }
+    50%      { opacity: 1; }
+}
+[data-theme="obsidian"] #pingCanvas {
+    animation: traceGlow 2.6s ease-in-out infinite;
+}
+
+/* Accent underline wipe on nav activation */
+@keyframes tabUnderline {
+    from { transform: scaleX(0); }
+    to   { transform: scaleX(1); }
+}
+[data-theme="obsidian"] .nav-tab.active {
+    animation: tabUnderline 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Theme switch control */
+.theme-toggle {
+    display: inline-flex; align-items: center; gap: 7px;
+    height: 30px; padding: 0 12px;
+    border-radius: var(--radius-full);
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    font-family: var(--font-mono); font-size: 0.66rem; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+}
+.theme-toggle:hover {
+    color: var(--text-primary);
+    border-color: var(--border-accent);
+    background: var(--bg-card-hover);
+    transform: translateY(-1px);
+}
+[data-theme="obsidian"] .theme-toggle:hover {
+    box-shadow: 0 0 18px rgba(255,45,85,0.30);
+}
+.theme-toggle .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.5);
+    transition: all 0.28s ease;
+}
+[data-theme="obsidian"] .theme-toggle .dot {
+    background: linear-gradient(180deg, #ff6b81, #c9184a);
+    box-shadow: 0 0 10px rgba(255,45,85,0.8);
+}
+
+/* Respect the OS setting — kill every decorative loop above */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+    }
+}

@@ -45,6 +45,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     initCanvas();
     bindEvents();
     initBootOverlay();
+    initThemeToggle();
 
     await initApiBase(); // find the backend before the first fetch
 
@@ -62,7 +63,44 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 // -----------------------------------------------------------------------------
-// AUTO-UPDATE FEED — main process pushes status here (toast + terminal)
+// THEME TOGGLE â€” Monochrome (default) <-> Obsidian (black & red)
+// The Obsidian palette is entirely in CSS under [data-theme="obsidian"], so
+// this only flips the attribute on <html> and syncs the button label.
+// Choice persists in localStorage and is applied before first paint by the
+// inline snippet in index.html, so there is no flash of the wrong theme.
+// -----------------------------------------------------------------------------
+const THEME_KEY = "wt.theme";
+
+function applyTheme(theme) {
+    const obsidian = theme === "obsidian";
+    if (obsidian) {
+        document.documentElement.setAttribute("data-theme", "obsidian");
+    } else {
+        document.documentElement.removeAttribute("data-theme");
+    }
+    const label = document.getElementById("themeToggleLabel");
+    if (label) label.textContent = obsidian ? "Obsidian" : "Mono";
+    const btn = document.getElementById("btnThemeToggle");
+    if (btn) btn.setAttribute("aria-pressed", obsidian ? "true" : "false");
+}
+
+function initThemeToggle() {
+    let stored = null;
+    try { stored = localStorage.getItem(THEME_KEY); } catch (_) {}
+    applyTheme(stored || "mono");
+
+    const btn = document.getElementById("btnThemeToggle");
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+        const next = document.documentElement.getAttribute("data-theme") === "obsidian" ? "mono" : "obsidian";
+        applyTheme(next);
+        try { localStorage.setItem(THEME_KEY, next); } catch (_) {}
+        showToast(next === "obsidian" ? "Obsidian theme (black & red)" : "Monochrome theme", "info");
+    });
+}
+
+// -----------------------------------------------------------------------------
+// AUTO-UPDATE FEED â€” main process pushes status here (toast + terminal)
 // -----------------------------------------------------------------------------
 function setUpdatesButton(busy) {
     const btn = document.getElementById("btnCheckUpdates");
@@ -141,7 +179,22 @@ function initTabs() {
             const pane = document.getElementById(targetId);
             if (pane) pane.classList.add("active");
 
-            if (targetId === "tab-processes") {
+                if (targetId === "tab-advanced") {
+                    catalogFilter = "performance";
+                    catalogHostId = "advGroups";
+                    renderCatalog();
+                }
+                if (targetId === "tab-routing") {
+                    catalogFilter = "all";
+                    catalogHostId = "gamingGroups";
+                    renderCatalog();
+                }
+                if (targetId === "tab-network") {
+                    catalogFilter = "cat:Network";
+                    catalogHostId = "networkGroups";
+                    renderCatalog();
+                }
+                if (targetId === "tab-processes") {
                 fetchProcesses();
                 fetchServices();
                 fetchTasks();
@@ -149,7 +202,7 @@ function initTabs() {
             if (targetId === "tab-startup") {
                 fetchStartupApps();
             }
-            if (targetId === "tab-advanced") {
+            if (targetId === "tab-advanced" || targetId === "tab-routing" || targetId === "tab-network") {
                 fetchCatalog();
             }
         });
@@ -164,10 +217,17 @@ function showToast(message, type = "info") {
     const toast = document.createElement("div");
     toast.className = "toast";
     
-    let icon = `<span class="pulse-dot" style="color:#ffffff;"></span>`;
-    if (type === "success") icon = `<span class="pulse-dot" style="color:#ffffff;"></span>`;
-    if (type === "error") icon = `<span class="pulse-dot" style="color:#8e8e93;"></span>`;
-    if (type === "warn") icon = `<span class="pulse-dot" style="color:#c7c7cc;"></span>`;
+    // Icon colours come from CSS custom properties so they follow the active
+    // theme; the inline fallbacks only apply if the vars are missing.
+    const infoC = "var(--accent-cyan, #ffffff)";
+    const okC = "var(--accent-emerald, #ffffff)";
+    const errC = "var(--text-muted, #8e8e93)";
+    const warnC = "var(--accent-amber, #c7c7cc)";
+
+    let icon = `<span class="pulse-dot" style="color:${infoC};"></span>`;
+    if (type === "success") icon = `<span class="pulse-dot" style="color:${okC};"></span>`;
+    if (type === "error") icon = `<span class="pulse-dot" style="color:${errC};"></span>`;
+    if (type === "warn") icon = `<span class="pulse-dot" style="color:${warnC};"></span>`;
 
     toast.innerHTML = `${icon} <span>${message}</span>`;
     container.appendChild(toast);
@@ -342,9 +402,19 @@ function syncSwitches() {
     });
 }
 
+// Human-readable name for a tweak. Tweak labels are imperative ("Disable X",
+// "Remove Y", "Add Z"), so the switch being ON means that action is being
+// APPLIED. The old code showed a generic "Enabling <id>" with the raw id
+// (vbsOff), which contradicted the label and told the user nothing.
+function tweakName(id) {
+    const row = (cachedCatalogList || []).find(t => t.id === id);
+    return (row && row.label) ? row.label : id;
+}
+
 async function setTweak(id, enabled) {
-    showToast(`${enabled ? 'Enabling' : 'Restoring'} ${id}...`, "info");
-    appendLog(`[TWEAK] ${id} → ${enabled ? 'OPTIMIZED' : 'WINDOWS DEFAULT'}...`);
+    const name = tweakName(id);
+    showToast(enabled ? `Applying: ${name}...` : `Restoring default: ${name}...`, "info");
+    appendLog(`[TWEAK] ${name} → ${enabled ? 'APPLYING' : 'RESTORING WINDOWS DEFAULT'}...`);
     lastCatalog[id] = !!enabled; // optimistic — corrected by refetch below
     try {
         const res = await fetch(`${API_BASE}/api/tweak/set`, {
@@ -354,8 +424,8 @@ async function setTweak(id, enabled) {
         });
         const data = await res.json();
         if (data.success) {
-            appendLog(`[OK] ${id} ${enabled ? 'optimized' : 'restored to default'}.${data.reboot ? ' Reboot recommended.' : ''}`, "ok");
-            showToast(`${id} ${enabled ? 'optimized' : 'restored'}${data.reboot ? ' (reboot recommended)' : ''}`, "success");
+            appendLog(`[OK] ${name} ${enabled ? 'applied' : 'restored to Windows default'}.${data.reboot ? ' Reboot recommended.' : ''}`, "ok");
+            showToast(enabled ? `Applied: ${name}${data.reboot ? ' (reboot recommended)' : ''}` : `Restored: ${name}`, "success");
             fetchSystemStatus();
             fetchNetworkStatus();
             fetchCatalog();
@@ -377,20 +447,45 @@ async function setTweak(id, enabled) {
 // -----------------------------------------------------------------------------
 // ADVANCED CATALOG — 50+ data-driven tweaks rendered from the backend
 // -----------------------------------------------------------------------------
+// "performance" = only entries with a real, audited performance mechanism (the
+// Performance Tweaks tab). "all" = every catalog entry grouped by category.
+let catalogFilter = "performance";
+let catalogHostId = "advGroups";
+
 function renderCatalog() {
-    const list = cachedCatalogList || [];
     const q = ((document.getElementById("advSearch") || {}).value || "").trim().toLowerCase();
-    const countEl = document.getElementById("advCount");
-    const host = document.getElementById("advGroups");
+    const countId = catalogHostId === "gamingGroups" ? "gamingCount"
+                  : catalogHostId === "networkGroups" ? "networkTweakCount"
+                  : "advCount";
+    const countEl = document.getElementById(countId);
+    const host = document.getElementById(catalogHostId);
     if (!host) return;
 
+    const all = cachedCatalogList || [];
+    // Three views over one catalog: the 11 audited performance entries, the
+    // Network category (rendered inside the Network & Ping Lab), or everything
+    // else grouped (Gaming Tweaks).
+    //
+    // Network is EXCLUDED from the Gaming Tweaks view on purpose - it has its own
+    // tab now, and showing it in both places was the bug the human reported.
+    const NETWORK_TAB_CATEGORIES = ["Network"];
+    let list;
+    if (catalogFilter === "performance") {
+        list = all.filter(t => t.advanced === true);
+    } else if (catalogFilter.startsWith("cat:")) {
+        const want = catalogFilter.slice(4);
+        list = all.filter(t => t.category === want);
+    } else {
+        list = all.filter(t => !NETWORK_TAB_CATEGORIES.includes(t.category));
+    }
     if (!list || list.length === 0) {
         host.innerHTML = `<div style="color:var(--text-muted); font-size:0.8rem; padding:16px;">Loading catalog…</div>`;
         return;
     }
 
-    const order = ["Gaming", "Network", "Privacy", "Interface", "System", "Updates"];
+    const order = ["Gaming", "Network", "Privacy", "Interface", "System", "Updates", "AI Features"];
     const groups = {};
+    const uncategorised = [];
     let totalMatching = 0;
 
     list.forEach(t => {
@@ -398,37 +493,62 @@ function renderCatalog() {
         const matchesQuery = !q || (
             (t.label || "").toLowerCase().includes(q) ||
             (t.desc || "").toLowerCase().includes(q) ||
+            (t.caution || "").toLowerCase().includes(q) ||
             (t.id || "").toLowerCase().includes(q) ||
             (t.category || "").toLowerCase().includes(q)
         );
         if (matchesQuery) {
             totalMatching++;
-            (groups[t.category] = groups[t.category] || []).push(t);
+            // A row with a missing or empty category used to key the group on the
+            // literal string "undefined" (JS coerces the key), which rendered a
+            // group literally titled "undefined" with no signal anything was wrong.
+            // Collect those separately and name them honestly instead.
+            const cat = (t.category || "").trim();
+            if (!cat) { uncategorised.push(t); return; }
+            (groups[cat] = groups[cat] || []).push(t);
         }
     });
 
     if (countEl) {
-        countEl.textContent = q ? `${totalMatching} of ${list.length} tweaks` : `${list.length} tweaks`;
+        countEl.textContent = q ? `${totalMatching} of ${list.length}` : `${list.length}`;
     }
 
     const matchingCategories = order.filter(c => groups[c] && groups[c].length > 0);
+    // Any tweak the server sent in a category not in `order` still needs rendering,
+    // otherwise a new category would silently vanish from the UI. GAMMA is right
+    // that the fallback is correct and the SILENCE is the defect: keep the data,
+    // leave a breadcrumb.
+    const unknownCats = Object.keys(groups).filter(c => !order.includes(c)).sort();
+    const renderOrder = matchingCategories.concat(unknownCats);
 
-    if (matchingCategories.length === 0) {
+    const anomalies = unknownCats.length + (uncategorised.length ? 1 : 0);
+    if (anomalies > 0) {
+        const bits = [];
+        if (unknownCats.length) bits.push(`unrecognised category: ${unknownCats.join(", ")}`);
+        if (uncategorised.length) bits.push(`${uncategorised.length} tweak(s) with no category`);
+        appendLog(`[WARN] catalog sent ${bits.join("; ")} — not in the UI's category list`, "err");
+    }
+
+    // Both conditions must be empty. Testing renderOrder alone silently dropped
+    // every row when the whole catalog was uncategorised, because uncategorised
+    // rows live in their own array and never reach renderOrder. Found by GAMMA.
+    if (renderOrder.length === 0 && uncategorised.length === 0) {
         host.innerHTML = `
             <div style="text-align:center; padding:36px 16px; color:var(--text-muted);">
                 <div style="font-size:0.92rem; font-weight:600; margin-bottom:6px; color:var(--text-secondary);">No tweaks matching "${escapeHtml(q)}"</div>
                 <div style="font-size:0.78rem;">Try searching for a different keyword like "dns", "game", "telemetry", or "mouse".</div>
             </div>`;
     } else {
-        host.innerHTML = matchingCategories.map(c => `
+        const groupsHtml = renderOrder.map(c => `
             <div class="adv-group">
-                <div class="adv-group-title">${escapeHtml(c)} <span class="adv-group-n">${groups[c].length}</span></div>
+                <div class="adv-group-title">${escapeHtml(c)} <span class="adv-group-n">${groups[c].length}</span>${c === "AI Features" ? ' <span class="badge badge-neutral" title="Windows features that use AI or send data to a cloud model">cloud-dependent</span>' : ''}</div>
                 <div class="tweak-list">
                 ${groups[c].map(t => `
-                    <div class="tweak-item">
+                    <div class="tweak-item${t.advanced ? ' is-advanced' : ''}">
                         <div class="tweak-left">
-                            <div class="tweak-name">${escapeHtml(t.label)}${t.reboot ? ' <span class="badge badge-neutral" title="Needs reboot">↻</span>' : ''}</div>
+                            <div class="tweak-name">${escapeHtml(t.label)}${t.advanced ? ' <span class="badge badge-warning" title="Real performance effect - read the guidance, some trade security or battery">PERF</span>' : ''}${t.reboot ? ' <span class="badge badge-neutral" title="Needs reboot">↻</span>' : ''}${t.needsVerify ? ' <span class="badge badge-danger" title="Registry value not independently verified on this machine">unverified</span>' : ''}</div>
                             <div class="tweak-desc">${escapeHtml(t.desc)}</div>
+                            ${t.caution ? `<div class="tweak-caution"><span class="tweak-caution-tag">${t.advanced ? 'Before you enable' : 'Note'}</span> ${escapeHtml(t.caution)}</div>` : ''}
                         </div>
                         <label class="switch" title="ON = optimized, OFF = Windows default">
                             <input type="checkbox" data-tweak="${escapeHtml(t.id)}" ${t.active ? 'checked' : ''}>
@@ -437,6 +557,27 @@ function renderCatalog() {
                     </div>`).join("")}
                 </div>
             </div>`).join("");
+
+        const uncategorisedHtml = uncategorised.length ? `
+            <div class="adv-group">
+                <div class="adv-group-title">Uncategorised <span class="adv-group-n">${uncategorised.length}</span>
+                    <span class="badge badge-danger" title="The server sent these without a category">no category</span></div>
+                <div class="tweak-list">
+                ${uncategorised.map(t => `
+                    <div class="tweak-item is-advanced">
+                        <div class="tweak-left">
+                            <div class="tweak-name">${escapeHtml(t.label)} <span class="badge badge-danger">no category</span></div>
+                            <div class="tweak-desc">${escapeHtml(t.desc || "")}</div>
+                        </div>
+                        <label class="switch" title="ON = optimized, OFF = Windows default">
+                            <input type="checkbox" data-tweak="${escapeHtml(t.id)}" ${t.active ? 'checked' : ''}>
+                            <span class="slider"></span>
+                        </label>
+                    </div>`).join("")}
+                </div>
+            </div>` : "";
+
+        host.innerHTML = groupsHtml + uncategorisedHtml;
     }
     syncSwitches();
 }
@@ -840,9 +981,21 @@ async function runMtuTest() {
     try {
         const res = await fetch(`${API_BASE}/api/mtu-test`);
         const data = await res.json();
-        document.getElementById("detectedMtuDisplay").textContent = `${data.detectedMaxUnfragmentedMtu} bytes (Payload: ${data.detectedMaxUnfragmentedMtu - 28})`;
-        appendLog(`[OK] Max Unfragmented MTU detected: ${data.detectedMaxUnfragmentedMtu}. Recommended: 1280.`, "ok");
-        showToast(`Detected MTU: ${data.detectedMaxUnfragmentedMtu}`, "info");
+
+        // success=false means the binary search never received a single reply,
+        // so detectedMaxUnfragmentedMtu is still the 1252 default + 28 = 1280
+        // seed. Presenting that as a measurement is indistinguishable from a
+        // real 1280 result - and 1280 is also the hardcoded "recommended"
+        // value. Show "--" rather than a fabricated number.
+        if (data.success === false) {
+            document.getElementById("detectedMtuDisplay").textContent = "--";
+            appendLog(`[ERR] MTU test failed - no ICMP replies received. Detected MTU unavailable (target unreachable or probes blocked).`, "err");
+            showToast("MTU test failed - target unreachable", "error");
+        } else {
+            document.getElementById("detectedMtuDisplay").textContent = `${data.detectedMaxUnfragmentedMtu} bytes (Payload: ${data.detectedMaxUnfragmentedMtu - 28})`;
+            appendLog(`[OK] Max Unfragmented MTU detected: ${data.detectedMaxUnfragmentedMtu}. Recommended: 1280.`, "ok");
+            showToast(`Detected MTU: ${data.detectedMaxUnfragmentedMtu}`, "info");
+        }
     } catch (e) {
         appendLog(`[ERR] MTU test failed: ${e.message}`, "err");
     }
@@ -887,8 +1040,20 @@ async function runDnsBenchmark() {
             </tr>
         `).join("");
 
-        appendLog(`[OK] DNS Benchmark complete. Lowest latency: ${list[0].name} (${list[0].latency} ms)`, "ok");
-        showToast(`Fastest DNS: ${list[0].name} (${list[0].latency}ms)`, "success");
+        // Rows sort ascending by latency, so untested providers (latency 999,
+        // status "Timeout") sink to the tail. That means list[0] is a genuinely
+        // measured resolver whenever ANY row measured - but if the deadline
+        // expired before a single probe landed, every row is 999 and list[0]
+        // would still name a "winner" that was never tested, while claiming
+        // success. Gate on status so a total timeout reports as one.
+        const winner = list[0];
+        if (winner && winner.status === "Online") {
+            appendLog(`[OK] DNS Benchmark complete. Lowest latency: ${winner.name} (${winner.latency} ms)`, "ok");
+            showToast(`Fastest DNS: ${winner.name} (${winner.latency}ms)`, "success");
+        } else {
+            appendLog(`[ERR] DNS benchmark timed out - no resolver responded within the time budget. Results discarded.`, "err");
+            showToast("DNS benchmark timed out - no resolver responded", "error");
+        }
     } catch (e) {
         appendLog(`[ERR] DNS benchmark failed: ${e.message}`, "err");
     } finally {

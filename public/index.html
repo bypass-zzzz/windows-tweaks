@@ -7,6 +7,15 @@
     <title>Windows Tweaks // Ultra-Low Latency & High Performance Suite</title>
     <link rel="stylesheet" href="css/style.css">
     <link rel="icon" type="image/jpeg" href="assets/logo.jpg">
+    <script>
+        // Apply the saved theme before first paint so the Obsidian palette
+        // never flashes as monochrome. Must stay in sync with THEME_KEY in app.js.
+        try {
+            if (localStorage.getItem("wt.theme") === "obsidian") {
+                document.documentElement.setAttribute("data-theme", "obsidian");
+            }
+        } catch (_) {}
+    </script>
     <style>
         .titlebar { -webkit-app-region: drag; height: 0; position: fixed; top: 0; left: 0; right: 160px; z-index: 9999; }
         .win-controls { -webkit-app-region: no-drag; position: fixed; top: 0; right: 0; display: flex; align-items: center; z-index: 10000; height: 40px; }
@@ -71,6 +80,10 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
                 Check for Updates
             </button>
+            <button id="btnThemeToggle" class="theme-toggle" title="Switch between Monochrome and Obsidian (black &amp; red)">
+                <span class="dot"></span>
+                <span id="themeToggleLabel">Mono</span>
+            </button>
         </div>
     </header>
 
@@ -98,11 +111,11 @@
         </button>
         <button class="nav-tab" data-tab="tab-advanced">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
-            Advanced Tweaks
+            Performance Tweaks
         </button>
         <button class="nav-tab" data-tab="tab-routing">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/></svg>
-            Routing
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+            Gaming Tweaks
         </button>
         <button class="nav-tab" data-tab="tab-terminal">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
@@ -417,6 +430,24 @@
                             </div>
                             <label class="switch" title="ON = optimized, OFF = Windows default"><input type="checkbox" data-tweak="tcpPorts"><span class="slider"></span></label>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Network & Ping Lab registry settings, driven by the catalog -->
+                <div class="card" style="margin-top:18px;">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 2l20 20M8.5 16.5a5 5 0 017 0M5 12.9a10 10 0 0114 0"/><circle cx="12" cy="20" r="1"/></svg>
+                            Network &amp; Ping Settings
+                        </div>
+                        <span class="badge badge-neutral" id="networkTweakCount">…</span>
+                    </div>
+                    <p style="font-size:0.78rem; color:var(--text-secondary); margin-bottom:12px;">
+                        Lower-latency network settings, grouped with the lab above so everything network-related lives in one place.
+                        Each one states who should not enable it.
+                    </p>
+                    <div id="networkGroups" style="display:flex; flex-direction:column; gap:18px;">
+                        <div style="color:var(--text-muted); font-size:0.8rem;">Loading&hellip;</div>
                     </div>
                 </div>
             </div>
@@ -735,13 +766,24 @@
                 <div class="card-header">
                     <div class="card-title">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
-                        Advanced Tweaks Catalog
-                    </div>
-                    <span class="badge badge-neutral" id="advCount">…</span>
+                          Performance Tweaks Catalog
+                      </div>
+                      <span class="badge badge-neutral" id="advCount">…</span>
+                  </div>
+                  <p style="font-size:0.78rem; color:var(--text-secondary); margin-bottom:12px;">
+                      Only tweaks with a real, measurable performance mechanism are listed here — audited against what is already default on this machine.
+                      Items marked ↻ need a reboot.
+                  </p>
+                  <div class="adv-legend">
+                      <div class="adv-legend-row">
+                          <span class="badge badge-warning">PERF</span>
+                          <span>Trades something &mdash; security, battery or stability &mdash; for measurable speed. Each one states who should <em>not</em> enable it, and why.</span>
+                      </div>
+                      <div class="adv-legend-row">
+                          <span class="badge badge-danger">unverified</span>
+                          <span>The intent is sound but the exact registry value has not been confirmed on this Windows build. Enable at your own judgement.</span>
+                      </div>
                 </div>
-                <p style="font-size:0.78rem; color:var(--text-secondary); margin-bottom:12px;">
-                    Every switch reads your live system state first — ON means optimized, OFF means stock Windows. Items marked ↻ need a reboot to take effect.
-                </p>
                 <input id="advSearch" class="adv-search" type="text" placeholder="Filter tweaks… (e.g. dns, mouse, telemetry)" autocomplete="off">
                 <div id="advGroups" style="display:flex; flex-direction:column; gap:20px; margin-top:16px;">
                     <div style="color:var(--text-muted); font-size:0.8rem;">Loading catalog…</div>
@@ -749,18 +791,28 @@
             </div>
         </section>
 
-        <!-- TAB: ROUTING (under construction) -->
+        <!-- TAB: GAMING TWEAKS (general performance changers) -->
         <section id="tab-routing" class="tab-pane">
-            <div class="card routing-coming">
-                <div class="routing-icon">
-                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/></svg>
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+                        Gaming Tweaks
+                    </div>
+                    <span class="badge badge-neutral" id="gamingCount">…</span>
                 </div>
-                <div class="routing-title">Policy Routing Lab</div>
-                <div class="routing-sub">Coming soon — we're building this next</div>
-                <div class="tweak-list" style="max-width:520px; margin:18px auto 0; text-align:left;">
-                    <div class="tweak-item"><div class="tweak-left"><div class="tweak-name">Per-app interface pinning</div><div class="tweak-desc">Force a game through Ethernet while everything else uses Wi-Fi.</div></div><span class="badge badge-neutral">Planned</span></div>
-                    <div class="tweak-item"><div class="tweak-left"><div class="tweak-name">Route table viewer</div><div class="tweak-desc">Live Windows routing table with metric editing.</div></div><span class="badge badge-neutral">Planned</span></div>
-                    <div class="tweak-item"><div class="tweak-left"><div class="tweak-name">Latency-based gateway picker</div><div class="tweak-desc">Benchmark gateways and switch to the fastest automatically.</div></div><span class="badge badge-neutral">Planned</span></div>
+                <p style="font-size:0.78rem; color:var(--text-secondary); margin-bottom:12px;">
+                    The tweaks that actually change how a game performs &mdash; CPU scheduling, GPU behaviour, memory and network path.
+                    Every switch reads your live system state first, so ON means the tweak is applied and OFF means stock Windows.
+                </p>
+                <div class="adv-legend">
+                    <div class="adv-legend-row">
+                        <span class="badge badge-warning">PERF</span>
+                        <span>Changes measurable performance. Still read the guidance &mdash; some trade security or battery for speed, and the note says who should not enable it.</span>
+                    </div>
+                </div>
+                <div id="gamingGroups" style="display:flex; flex-direction:column; gap:20px; margin-top:16px;">
+                    <div style="color:var(--text-muted); font-size:0.8rem;">Loading&hellip;</div>
                 </div>
             </div>
         </section>
