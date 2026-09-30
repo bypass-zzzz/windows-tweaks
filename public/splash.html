@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Windows Tweaks — Loading</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-font-smoothing: antialiased; }
+  html, body { height: 100%; }
+  body {
+    background: #000;
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; overflow: hidden; user-select: none;
+    -webkit-app-region: drag;
+    background-image:
+      radial-gradient(ellipse 90% 45% at 50% -8%, rgba(255,255,255,0.16) 0%, transparent 60%),
+      radial-gradient(ellipse 60% 35% at 50% 110%, rgba(255,255,255,0.06) 0%, transparent 60%),
+      linear-gradient(180deg, #0c0c0f 0%, #000 55%, #000 100%);
+  }
+  .wrap { width: 340px; text-align: center; animation: rise .5s cubic-bezier(.32,.72,0,1) both; }
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  .logo {
+    width: 84px; height: 84px; margin: 0 auto 20px; border-radius: 22px; overflow: hidden;
+    background: linear-gradient(180deg,#fff,#c7c7cc);
+    border: 1px solid rgba(255,255,255,.5);
+    box-shadow: 0 8px 40px rgba(255,255,255,.25), inset 0 1px 1px rgba(255,255,255,.9);
+  }
+  .logo img { width: 100%; height: 100%; object-fit: cover; filter: grayscale(100%) contrast(1.05); }
+  h1 {
+    font-size: 1.2rem; font-weight: 800; letter-spacing: .2em; text-indent: .2em;
+    background: linear-gradient(180deg,#fff 20%,#a8a8b0 100%);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .sub { margin-top: 6px; font-size: .62rem; letter-spacing: .28em; text-indent: .28em; color: #7a7a85; font-family: Consolas, monospace; }
+  .tag {
+    display: inline-block; margin-top: 12px; font-size: .6rem; font-family: Consolas, monospace; font-weight: 600;
+    letter-spacing: .1em; padding: 4px 12px; border-radius: 999px;
+    background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.18); color: #fff;
+  }
+  .bar { margin-top: 28px; height: 6px; border-radius: 4px; background: rgba(255,255,255,.1); overflow: hidden; }
+  #fill {
+    height: 100%; width: 2%; border-radius: 4px;
+    background: linear-gradient(90deg,#6e6e73,#fff);
+    box-shadow: 0 0 14px rgba(255,255,255,.55);
+    transition: width .35s cubic-bezier(.32,.72,0,1);
+    position: relative;
+  }
+  #fill::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.7), transparent);
+    animation: shimmer 1.4s linear infinite;
+  }
+  @keyframes shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+  .row { display: flex; justify-content: space-between; align-items: baseline; margin-top: 10px; }
+  #pct { font-family: Consolas, monospace; font-size: .8rem; font-weight: 600; color: #fff; font-variant-numeric: tabular-nums; }
+  #status { font-family: Consolas, monospace; font-size: .7rem; color: #b8b8c0; min-height: 1.1em; margin-top: 12px; transition: opacity .2s; }
+  .cool { margin-top: 22px; font-size: .72rem; color: #7a7a85; min-height: 2.2em; line-height: 1.5; }
+  .dots::after { content: ""; animation: dots 1.2s steps(4) infinite; }
+  @keyframes dots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
+  .foot { margin-top: 26px; font-size: .6rem; letter-spacing: .2em; color: #3a3a3e; font-family: Consolas, monospace; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="logo"><img src="assets/logo.jpg" alt="Windows Tweaks" onerror="this.style.display='none'"></div>
+    <h1 class="splash-title">WINDOWS TWEAKS</h1>
+    <div class="sub">OPTIMIZATIONS</div>
+    <div class="tag">v2.5.6 KERNEL EDITION</div>
+    <div class="bar"><div id="fill"></div></div>
+    <div class="row"><span id="status" class="dots">Waking the engine</span><span id="pct">0%</span></div>
+    <div class="cool" id="cool">Polishing every pixel…</div>
+    <div class="foot">ULTRA-LOW LATENCY SUITE</div>
+  </div>
+<script>
+(function () {
+  var fill = document.getElementById('fill');
+  var pctEl = document.getElementById('pct');
+  var statusEl = document.getElementById('status');
+  var coolEl = document.getElementById('cool');
+
+  var tips = [
+    "Polishing every pixel…",
+    "Warming up the invariant TSC…",
+    "Teaching packets to skip the line…",
+    "Locking the kernel in RAM…",
+    "Evicting telemetry gremlins…",
+    "Charging the liquid glass…",
+    "Convincing Windows to go faster…",
+    "Defragmenting your expectations…"
+  ];
+  var tipIdx = 0, lastRealUpdate = 0, pct = 0;
+
+  function render(p, s) {
+    pct = Math.max(0, Math.min(100, p));
+    fill.style.width = pct + '%';
+    pctEl.textContent = Math.round(pct) + '%';
+    if (s) {
+      statusEl.style.opacity = '0';
+      setTimeout(function () { statusEl.textContent = s; statusEl.style.opacity = '1'; }, 150);
+    }
+  }
+
+  // Rotate cool lines when backend is quiet
+  setInterval(function () {
+    if (Date.now() - lastRealUpdate > 2600) {
+      tipIdx = (tipIdx + 1) % tips.length;
+      coolEl.style.opacity = '0';
+      setTimeout(function () { coolEl.textContent = tips[tipIdx]; coolEl.style.opacity = '1'; }, 180);
+    }
+  }, 2600);
+
+  function onReal(p, s) {
+    lastRealUpdate = Date.now();
+    render(p, s);
+    if (s) coolEl.textContent = s;
+  }
+
+  if (window.splashAPI && window.splashAPI.onProgress) {
+    lastRealUpdate = Date.now();
+    window.splashAPI.onProgress(function (p, s) { onReal(p, s); });
+  } else {
+    // Fallback (plain browser / file preview): simulate to 90%
+    lastRealUpdate = Date.now();
+    var fake = setInterval(function () {
+      if (pct >= 90) { clearInterval(fake); return; }
+      onReal(pct + Math.random() * 7, null);
+    }, 450);
+  }
+})();
+</script>
+</body>
+</html>
