@@ -1,6 +1,6 @@
 {
   "name": "windows-tweaks",
-  "version": "3.0.0",
+  "version": "3.1.5",
   "description": "Ultra-Low Latency & Zero-Bloat Performance Suite for Windows",
   "author": "Windows Tweaks",
   "main": "main.js",
@@ -18,9 +18,8 @@
       "provider": "github",
       "owner": "bypass-zzzz",
       "repo": "windows-tweaks",
-      "private": true,
-      "releaseType": "release",
-      "token": "GH_TOKEN_PLACEHOLDER"
+      "private": false,
+      "releaseType": "release"
     },
     "win": {
       "target": [

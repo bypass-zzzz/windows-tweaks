@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # WINDOWS TWEAKS - HIGH-PERFORMANCE LOW-LATENCY ENGINE BACKEND
 # Architecture: Native PowerShell Async Micro-Server with System.Net.HttpListener
 # ==============================================================================
@@ -151,6 +151,54 @@ function Get-PowerAcValue($sub, $setting) {
     if ($m.Success) { return [Convert]::ToInt32($m.Groups[1].Value, 16) } else { return $null }
 }
 
+# Picks the power scheme this app should activate.
+#
+# Prefers a Hybred Low Latency scheme because it differs from Ultimate Performance
+# in 35 settings, and the load-bearing ones all keep the CPU out of its idle states
+# and out of boost ramp-down:
+#   Processor idle disable              0 -> 1   (CPU leaves its idle states entirely)
+#   Performance decrease threshold   10% -> 100% (never backs off while work is present)
+#   Performance time check interval  15ms -> 5000ms (governor samples rarely, stays boosted)
+#   Performance increase threshold  30% -> 0%    (ramps to max immediately)
+#   Interrupt Steering Mode            0 -> 3     (reduces interrupt latency variance)
+# For a CPU-bound workload with spiky frame times, not dropping out of boost between
+# frames is worth a lot of frame rate.
+#
+# Cost, and it is not a small one: the CPU never enters a low-power idle state, so idle
+# power draw, idle temperature and fan noise all rise, and sustained all-core
+# temperature can reduce boost headroom. On a laptop with poor cooling that can make
+# things worse rather than better. Not for laptops with bad cooling.
+#
+# This machine can carry several Hybred copies that differ only in Minimum processor
+# state (100 vs 0), so prefer the one pinned at 100.
+function Get-PreferredPowerScheme {
+    $SUB_PROC = '54533251-82be-4824-96c1-47b60b740d00'
+    $PROCTHROTTLEMIN = '893dee8e-2bef-41e0-89c6-b55d0929964c'
+
+    $found = @()
+    foreach ($line in (& powercfg.exe /list 2>$null)) {
+        $t = $line.ToString()
+        if ($t -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\s+\((.+)\)\s*\*?\s*$') {
+            $found += [pscustomobject]@{ Guid = $Matches[1]; Name = $Matches[2].Trim() }
+        }
+    }
+
+    $hybred = @($found | Where-Object { $_.Name -match 'Hybred' })
+    if ($hybred.Count -gt 0) {
+        foreach ($h in $hybred) {
+            $min = $null
+            $q = (& powercfg.exe /query $h.Guid $SUB_PROC $PROCTHROTTLEMIN 2>$null) | Out-String
+            if ($q -match 'Current AC Power Setting Index:\s*0x([0-9a-fA-F]+)') { $min = [Convert]::ToInt32($Matches[1], 16) }
+            if ($min -eq 100) { return $h }
+        }
+        return $hybred[0]
+    }
+    $ult = $found | Where-Object { $_.Name -match 'Ultimate Performance' } | Select-Object -First 1
+    if ($ult) { return $ult }
+    $hp = $found | Where-Object { $_.Name -match 'High performance' } | Select-Object -First 1
+    if ($hp) { return $hp }
+    return $null
+}
 function Get-SystemAudit {
     # Perf: the two slow WMI calls here used to be Win32_Processor (~1.0 s,
     # only for LoadPercentage) and Win32_OperatingSystem (~0.3 s, only for
@@ -228,7 +276,9 @@ function Get-SystemAudit {
 
     # Delivery Optimization P2P
     $doMode = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization" -Name "DODownloadMode" -ErrorAction SilentlyContinue).DODownloadMode
-    $isDoDisabled = ($doMode -eq 0)
+    # 99 or 0 both mean "not using Delivery Optimization". Any other value, including
+    # absent, means the default (1 = LAN) or a bypass mode is in effect.
+    $isDoDisabled = ($doMode -eq 99 -or $doMode -eq 0)
 
     # Total active processes count (reuse the $cpu query above - one WMI round-trip)
     $procCount = (Get-Process -ErrorAction SilentlyContinue).Count
@@ -255,7 +305,13 @@ function Get-SystemAudit {
     $isPrecisionOff = ($mouseSpeed -eq "0")
 
     $mmAgent = Get-MMAgent -ErrorAction SilentlyContinue
-    $isMemDecompressed = ($mmAgent -and ($mmAgent.MemoryCompressionEnabled -eq $false))
+    # The property is MemoryCompression. There is no MemoryCompressionEnabled -
+    # referencing it returned $null, and `$null -eq $false` is FALSE, so this probe
+    # always reported "not decompressed" and the Disable Memory Compression switch
+    # could never show ON even when compression really was off. The Set-TweakState
+    # branch for this same id read the correct property, so the file disagreed with
+    # itself: the write verified correctly while the switch display never did.
+    $isMemDecompressed = ($null -ne $mmAgent -and $mmAgent.MemoryCompression -eq $false)
 
     $cpuMinAc = Get-PowerAcValue "SUB_PROCESSOR" "PROCTHROTTLEMIN"
     $cpuMaxAc = Get-PowerAcValue "SUB_PROCESSOR" "PROCTHROTTLEMAX"
@@ -615,9 +671,14 @@ function Run-MtuTest {
     $detectedMtu = $bestPayload + 28
     return @{
         adapter = if ($adapter) { $adapter.Name } else { "Ethernet" }
-        optimalGamingMtu = 1280
         detectedMaxUnfragmentedMtu = $detectedMtu
-        recommended = 1280
+        # These used to be hardcoded to 1280 while the probe measured 1500 - the
+        # function measured correctly and then recommended the opposite of its own
+        # result. The best MTU for latency is the LARGEST packet the path carries
+        # unfragmented: bigger packets means fewer packets and less per-packet
+        # header overhead. 1280 is only correct where 1500 genuinely fragments.
+        recommended = $detectedMtu
+        optimalGamingMtu = $detectedMtu
         # Additive key: app.js already reads detectedMaxUnfragmentedMtu, so the
         # shape it parses is unchanged. Consumers must gate on this before
         # trusting detectedMaxUnfragmentedMtu - see app.js runMtuTest().
@@ -629,7 +690,7 @@ function Get-BloatServices {
     $targetServices = @(
         @{ Name = "DiagTrack"; Display = "Connected User Experiences and Telemetry"; Safe = $true; Impact = "High" },
         @{ Name = "WerSvc"; Display = "Windows Error Reporting Service"; Safe = $true; Impact = "Medium" },
-        @{ Name = "SysMain"; Display = "SysMain (SuperFetch Disk Caching)"; Safe = $true; Impact = "High" },
+    
         @{ Name = "lfsvc"; Display = "Geolocation Service"; Safe = $true; Impact = "Low" },
         @{ Name = "TrkWks"; Display = "Distributed Link Tracking Client"; Safe = $true; Impact = "Low" },
         @{ Name = "RemoteRegistry"; Display = "Remote Registry Access"; Safe = $true; Impact = "Medium" },
@@ -645,32 +706,156 @@ function Get-BloatServices {
         @{ Name = "PcaSvc"; Display = "Program Compatibility Assistant"; Safe = $true; Impact = "Low" }
     )
 
+    # ---------------------------------------------------------------------------
+# SERVICE GROUPS
+#
+# Services are grouped from "obvious background consumer junk" through to the
+# components Windows itself depends on, so the tab reads as a spectrum rather
+# than a flat alphabetical dump. Anything not matched by a pattern below falls
+# into Core, which is deliberately read-only: those are the services that keep
+# Windows bootable and networkable (RpcSs, DcomLaunch, WinDefend, Dhcp,
+# EventLog, PlugPlay, Power, BFE, nsi, CryptSvc, AudioSrv, Themes, Schedule).
+# Bulk-disabling that group can leave a machine that will not boot or has no
+# network, so it gets no write button at all.
+#
+# modifiableGroups are the ones where a bulk disable is offered. Membership is
+# still gated per-service by the $allowed allow-list in Set-ServiceState, so a
+# group can be bulk-disabled but only ever touches services that were individually
+# vetted as safe.
+# ---------------------------------------------------------------------------
+$script:ServiceGroups = @(
+    @{ Id = "telemetry"; Title = "Telemetry & Diagnostics"; Desc = "Background services that report usage and crash data to Microsoft. Safe to disable on a gaming machine."; Modifiable = $true }
+    @{ Id = "update"; Title = "Windows Update & Delivery"; Desc = "Update orchestration and peer-to-peer payload delivery. Disabling stops automatic patching - leave on unless you update manually."; Modifiable = $true }
+    @{ Id = "gaming"; Title = "Xbox & Gaming Services"; Desc = "Game Bar, achievements and Xbox sign-in helpers. Disabling these removes Game Bar overlays and cloud saves."; Modifiable = $true }
+    @{ Id = "consumer"; Title = "Bloatware & Consumer Apps"; Desc = "Preinstalled consumer apps: Phone Link, Smart Wallet/Pay, Tips, Mixed Reality and similar. Usually unused on a gaming machine."; Modifiable = $true }
+    @{ Id = "integration"; Title = "Smart Features & Cloud Integration"; Desc = "Widgets, Copilot hooks, content suggestions and cross-device continuity. Turning these off removes Start menu ads and the widgets board."; Modifiable = $true }
+    @{ Id = "media"; Title = "Printing, Fax & Media"; Desc = "Print spooler, fax and Windows Media. Disable the spooler only if you never print."; Modifiable = $true }
+    @{ Id = "search"; Title = "Search, Indexing & Prefetch"; Desc = "Windows Search index and Superfetch-style prefetch. Disabling costs you fast Start menu results and cold launch times."; Modifiable = $true }
+    @{ Id = "devices"; Title = "Bluetooth & Device Discovery"; Desc = "Bluetooth and nearby-device pairing services. Only disable if you use wired peripherals exclusively."; Modifiable = $true }
+    @{ Id = "vendor"; Title = "Third-Party & Driver Support"; Desc = "Per-device and vendor software: GPU, motherboard, RGB, fan and peripheral utilities. Installed by hardware drivers and other applications. Read-only - these belong to your drivers, not to Windows."; Modifiable = $false }
+    @{ Id = "security"; Title = "Security, Defender & Licensing"; Desc = "Defender, SmartScreen, licensing and update orchestration. Read-only - disabling these removes your protection."; Modifiable = $false }
+    @{ Id = "network"; Title = "Networking & Remote Access"; Desc = "TCP/IP stack, DNS client, firewall base and remote access. Read-only - disabling these can remove networking entirely."; Modifiable = $false }
+    @{ Id = "core"; Title = "Windows Core Services"; Desc = "The services Windows cannot start without: RPC, plug and play, event log, power, audio, themes, scheduler. Read-only - disabling these can leave a machine that will not boot."; Modifiable = $false }
+)
+
+# First matching pattern wins, so order is meaningful. Core is the fallback.
+$script:ServicePatterns = @(
+    # Vendor / per-device first. A gaming PC carries a lot of RGB, fan, GPU and
+    # peripheral driver services, and without this they all fall through to Core
+    # and bury the services Windows actually depends on.
+    @{ G = "vendor";     Re = '^(A-V|N-|AMDR|amd|AMD|ATK|A-V_|nv|NV|NVIDIA|Realtek|rt|Intel|Intel(R|RST)?|AudioDev|audiodg|A-Vi|WinRing0x|LED|Sophia|L-PCI|MSI|WSA|Nahimic|DTS|Dolby|Sonic|Razer|RGB|iCUE|Synapse|Armoury|Forecast|Fan|Elgato|Logi|RT|BthA|BluetoothUserService_|spacedesk|ExitLag|Futuremark|AnyDesk|Teams|Updater|Update|ClickToRun|OCStorage)' }
+    @{ G = "vendor";     Re = '\.Sys$|\.sys$' }
+    # RemoteRegistry sits here, not under networking: it is a remote-access
+    # surface the app is willing to close, so it belongs to a group that has a
+    # bulk action rather than the read-only networking group.
+    @{ G = "telemetry";  Re = '^(DiagTrack|dmwappushservice|WerSvc|MapsBroker|lfsvc|PcaSvc|TrkWks|wisvc|RemoteRegistry|DiagInv|diagnosticshub|diagnosticshub\.standardcollector)' }
+    @{ G = "update";     Re = '^(DoSvc|wuauserv|UsoSvc|WaaSMedicSvc|bits|BITS|InstallService|TrustedInstaller|wudf|USB)' }
+    @{ G = "gaming";     Re = '^(Xbl|Xbox|GameInput|XblAuthManager|XboxNetApiSvc|XboxGipSvc|GameDVR)' }
+    @{ G = "consumer";   Re = '^(YourPhone|PhoneLink|PhoneExperienceHost|RetailDemo|Wallet|TokenBroker|Bing|SearchHost|MixedReality|QuickAssist|TiWorker|WaaS)' }
+    @{ G = "integration"; Re = '^(CDPSvc|OneSync|Accounts|TokenBrokerCache|Unistore|WinStore|WindowsConnect|DeviceAssoc|CDPUserSvc|Widget|StartMenu|WaaSMedic)' }
+    @{ G = "media";      Re = '^(Spooler|Fax|WMPNetworkSvc|AudioSrv|AudioEndpointBuilder|Audiosrv|Print|WSearchMedia)' }
+    @{ G = "search";     Re = '^(WSearch|SysMain|Prefetch)' }
+    @{ G = "devices";    Re = '^(Bluetooth|BthService|DeviceInstall|DsmSvc|DevicePairing|CDPSvcSvc|FrameServer|MFiSvc)' }
+    @{ G = "security";   Re = '^(WinDefend|WdNisSvc|Sense|WdFilter|msSense|MpsSvc|BFE|wscsvc|CryptSvc|KeyIso|LicenseManager|SoftwareProtection|TrustedInstaller|SecurityHealth|AppInfo|Sense)' }
+    @{ G = "network";    Re = '^(Dhcp|Dnscache|DNSClientEventlogRegistry|NlaSvc|nsi|netprofm|RemoteRegistry|TermService|RpcEptMapper|Lanman|LanmanWorkstation|RemoteAccess|iphlpsvc|WinHttpAutoProxySvc|WebClient|Netman|netbt|BFE|SharedAccess)' }
+)
+
+function Get-ServiceGroupName($serviceName) {
+    foreach ($p in $script:ServicePatterns) {
+        if ($serviceName -match $p.Re) { return $p.G }
+    }
+    return "core"
+}
+
+# Actionable descriptions for the services this app is willing to change.
+# Windows' own Description field is used for everything else (267 of 273 services
+# on a typical install carry one, and it is Microsoft's text, so it is honest
+# rather than invented). These override it only where Windows is vague, because
+# "Connected User Experiences and Telemetry" does not tell you what turning it
+# off actually does.
+$script:ServiceDetails = @{
+    "DiagTrack"          = "Windows' telemetry collector. Queues diagnostic data and uploads it to Microsoft on a schedule. Runs continuously in the background whether or not you use anything that reports data."
+    "WerSvc"             = "Windows Error Reporting. Watches for application crashes and offers to send crash dumps to Microsoft. Disabling stops the prompts and the upload attempts."
+    "SysMain"            = "Superfetch. Preloads frequently used files into RAM. Now managed from Performance Tweaks, where it is a dropdown."
+    "lfsvc"             = "Geolocation service. Reports device location to apps and web pages. Disabling also breaks location-aware features and some store apps."
+    "TrkWks"             = "Distributed Component Tracking. Tracks file and registry usage for the Start menu's most-used lists and older compatibility tooling. Consumed largely by telemetry."
+    "RemoteRegistry"     = "Remote Registry. Allows remote machines to edit this computer's registry over the network. Not needed for normal use and a standing security exposure while enabled."
+    "wisvc"              = "Windows Insider Service. Collects diagnostic and usage data from machines opted into Insider builds. Harmless on a retail machine but pointless."
+    "MapsBroker"         = "Downloaded Maps broker. Keeps offline map tiles up to date in the background, which is network and disk traffic you did not ask for."
+    "WSearch"            = "Windows Search indexer. Builds the index that makes Start menu and Explorer searches fast. Disabling it leaves search working but slow, and it rebuilds slowly if re-enabled."
+    "XblGameSave"        = "Xbox Live Game Save sync. Backs up game saves to the cloud. Disabling means saves stay local only."
+    "XboxGipSvc"         = "Xbox Accessory Management. Enumerates and manages controllers and other Xbox peripherals."
+    "XboxNetApiSvc"      = "Xbox Live networking. Handles sign-in and multiplayer session traffic for Xbox titles."
+    "Spooler"            = "Print Spooler. Queues documents for printers. Only disable this if you genuinely never print - Office and some apps will error trying to print."
+    "CDPSvc"             = "Connected Devices Platform. Discovers nearby and paired devices for Phone Link, your Phone and universal clipboard. Mostly network chatter in the background."
+    "dmwappushservice"   = "Device Management Push Telemetry. Pushes device state to Microsoft for Intune-enrolled devices. Pure overhead on a personal machine."
+    "PcaSvc"             = "Program Compatibility Assistant. Detects known-incompatible programs and applies compatibility shims. Windows uses it to fix legacy apps; disabling can break older software."
+    "DoSvc"              = "Delivery Optimization. Downloads update payloads from other PCs on your network instead of Microsoft. Disabling means updates always come from Microsoft's servers, which is slower on a slow link but removes you as a peer."
+}
+
+function Get-ServiceDescription($svc, $curated) {
+    if ($curated) {
+        $d = $script:ServiceDetails[$svc.Name]
+        if ($d) { return $d }
+    }
+    $win = [string]$svc.Description
+    if (-not [string]::IsNullOrWhiteSpace($win)) { return ($win -replace '\s+', ' ').Trim() }
+    # Six services on this machine have no Description at all. Say what is
+    # actually true rather than inventing a purpose for them.
+    $display = [string]$svc.DisplayName
+    if ([string]::IsNullOrWhiteSpace($display)) { $display = $svc.Name }
+    return "No description published by Windows for this service. It is part of '$display'. Start type and live status shown here are read from the Service Control Manager."
+}
+
+# Return EVERY service on the machine, not just the curated telemetry set, so
+    # the Services tab is an honest view of what is installed and running. Only
+    # the curated entries above are marked modifiable - see $allowed in
+    # Set-ServiceState, which is the guard that actually prevents writes. The
+    # previous loop called Get-Service once per curated entry; at 270+ services
+    # that is a sequential call per row, so this reads the whole table at once.
+    $meta = @{}
+    foreach ($s in $targetServices) { $meta[$s.Name] = $s }
+
+    $all = @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue)
     $list = @()
-    foreach ($s in $targetServices) {
-        $svc = Get-Service -Name $s.Name -ErrorAction SilentlyContinue
-        if ($svc) {
-            $list += @{
-                name = $s.Name
-                displayName = $s.Display
-                status = $svc.Status.ToString()
-                startType = $svc.StartType.ToString()
-                safe = $s.Safe
-                impact = $s.Impact
-                isOptimized = ($svc.StartType.ToString() -eq "Disabled")
-            }
-        } else {
-            $list += @{
-                name = $s.Name
-                displayName = $s.Display
-                status = "Stopped"
-                startType = "Disabled"
-                safe = $s.Safe
-                impact = $s.Impact
-                isOptimized = $true
-            }
+    foreach ($svc in $all) {
+        $m = $meta[$svc.Name]
+        # Only services this app is actually willing to change are listed. The
+        # remaining ~260 on a typical install are shown nowhere: the human asked
+        # to drop the read-only rows, and listing a switch you cannot move is
+        # noise. $allowed in Set-ServiceState remains the write guard.
+        if (-not $m) { continue }
+        $startMode = [string]$svc.StartMode
+        $gid = Get-ServiceGroupName $svc.Name
+        $gdef = $script:ServiceGroups | Where-Object { $_.Id -eq $gid } | Select-Object -First 1
+        $list += @{
+            name = $svc.Name
+            displayName = [string]$svc.DisplayName
+            description = Get-ServiceDescription -svc $svc -curated ([bool]$m)
+            status = [string]$svc.State
+            startType = $startMode
+            path = [string]$svc.PathName
+            group = $gid
+            groupTitle = $gdef.Title
+            groupDesc = $gdef.Desc
+            groupModifiable = [bool]$gdef.Modifiable
+            # Present and modifiable only for the curated, vetted set. Everything
+            # else is informational: disabling a core service (WinDefend, Dhcp,
+            # EventLog, RpcSs, Power, BFE) can leave Windows unbootable or
+            # unnetworked, so those switches are not exposed.
+            curated = [bool]$m
+            safe = $(if ($m) { [bool]$m.Safe } else { $false })
+            impact = $(if ($m) { $m.Impact } else { "Unknown" })
+            isOptimized = ($startMode -eq "Disabled")
         }
     }
-    return $list
+
+    # Group order follows $script:ServiceGroups, then alphabetical within a group,
+    # so the list is stable between refreshes.
+    $order = @{}
+    $i = 0
+    foreach ($g in $script:ServiceGroups) { $order[$g.Id] = $i; $i++ }
+    return @($list | Sort-Object @{ Expression = { $order[$_.group] } }, name)
 }
 
 function Get-ProcessList {
@@ -717,22 +902,22 @@ function Purge-StandbyRam {
 # -----------------------------------------------------------------------------
 $script:RegTweaks = @(
     # --- Gaming ---
-    @{ id="copilotPolicy"; category="Gaming"; label="Disable Windows Copilot"; desc="Turns off the Copilot assistant and its background hooks."; path="HKCU:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot"; values=@(@{name="TurnOffWindowsCopilot";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
-    @{ id="bingSearch"; category="Gaming"; label="Disable Bing in Start Search"; desc="Start menu searches stay local - no web round-trip, instant results."; path="HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; values=@(@{name="DisableSearchBoxSuggestions";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
-    @{ id="bgApps"; category="Gaming"; label="Disable Background Apps"; desc="Stops UWP apps running in the background eating CPU and network."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications"; values=@(@{name="GlobalUserDisabled";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; advanced=$true; caution="Genuinely frees idle CPU and RAM, so this is one of the few real wins here. Do NOT enable if you rely on a Store app updating in the background, on Xbox/Game Pass apps syncing your library, or on anything that receives notifications while closed. Those stop working with no error - the app just goes quiet until you open it." },
-    @{ id="silentApps"; category="Gaming"; label="Block Silent Auto-Installed Apps"; desc="Stops Windows silently installing suggested apps (Candy Crush and co)."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"; values=@(@{name="SilentInstalledAppsEnabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
-    @{ id="getTips"; category="Gaming"; label="Disable Tips and Suggestions"; desc="Turns off Get Started tips, suggestions and soft-landing pages."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"; values=@(@{name="SoftLandingEnabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
-    @{ id="fullscreenOpt"; category="Gaming"; label="Disable Fullscreen Optimizations"; desc="Stops Windows 10/11 from injecting its own scaling and frame-pacing shim into fullscreen games, which is a frequent source of stutter and reduced performance on older titles."; path="HKCU:\System\CurrentControlSet\Control\GameConfigStore"; values=@(@{name="GameDVR_FSEBehaviorMode";type="DWord";on=2;off="__REMOVE__"}, @{name="GameDVR_HonorUserFSEBehaviorMode";type="DWord";on=1;off="__REMOVE__"}, @{name="GameDVR_DXGIHonorFSEWindowsCompatible";type="DWord";on=1;off="__REMOVE__"}, @{name="GameDVR_EFSEFeatureFlags";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Do NOT enable on a modern title that runs well - FSO exists to fix tearing and alt-tab on some GPUs, and forcing it off can make things worse. Turn it on per-game only, and A/B test a borderless-fullscreen benchmark before and after. Safe to leave off (this tweak's default)." },
-    @{ id="gameDvrOff"; category="Gaming"; label="Disable Game DVR Background Capture"; desc="Stops Windows continuously recording gameplay in the background. Removes a rolling video encode that costs disk writes and a few percent CPU even when you are not recording."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR"; values=@(@{name="AppCaptureEnabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Do NOT enable if you use Xbox Game Bar to record clips, or if you use Steam/GeForce overlay instead - those record independently and are unaffected, so you can enable this safely if you use those instead."; advanced=$true },
-    @{ id="xboxGameBar"; category="Gaming"; label="Disable Xbox Game Bar Overlay"; desc="Stops the Game Bar overlay from hooking into games. Removes an injected overlay that some titles pay a real framerate cost for and that occasionally causes input lag or crashes on Alt+Tab."; path="HKCU:\SOFTWARE\Microsoft\GameBar"; values=@(@{name="UseNexusForGameBarEnabled";type="DWord";on=0;off="__REMOVE__"}, @{name="ShowStartupPanel";type="DWord";on=0;off="__REMOVE__"}, @{name="AutoGameModeEnabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Do NOT enable if you use Win+G for performance widgets, achievements, or the Xbox Game Bar capture UI. This kills the whole bar, not just capture - use gameDvrOff above if you only want to stop recording." },
+    @{ id="copilotPolicy"; category="AI Features"; label="Disable Windows Copilot"; desc="Turns off the Copilot assistant and its background hooks."; path="HKCU:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot"; values=@(@{name="TurnOffWindowsCopilot";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
+    @{ id="bingSearch"; category="AI Features"; label="Disable Bing in Start Search"; desc="Start menu searches stay local - no web round-trip, instant results."; path="HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; values=@(@{name="DisableSearchBoxSuggestions";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
+    @{ id="bgApps"; category="System"; label="Disable Background Apps"; desc="Stops UWP apps running in the background eating CPU and network."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications"; values=@(@{name="GlobalUserDisabled";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; advanced=$true; caution="Genuinely frees idle CPU and RAM, so this is one of the few real wins here. Do NOT enable if you rely on a Store app updating in the background, on Xbox/Game Pass apps syncing your library, or on anything that receives notifications while closed. Those stop working with no error - the app just goes quiet until you open it." ; perf=$true},
+    @{ id="silentApps"; category="System"; label="Block Silent Auto-Installed Apps"; desc="Stops Windows silently installing suggested apps (Candy Crush and co)."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"; values=@(@{name="SilentInstalledAppsEnabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
+    @{ id="getTips"; category="Interface"; label="Disable Tips and Suggestions"; desc="Turns off Get Started tips, suggestions and soft-landing pages."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"; values=@(@{name="SoftLandingEnabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
+    @{ id="fullscreenOpt"; category="Gaming"; label="Disable Fullscreen Optimizations"; desc="Stops Windows 10/11 from injecting its own scaling and frame-pacing shim into fullscreen games, which is a frequent source of stutter and reduced performance on older titles. The real key is HKCU\System\GameConfigStore; an earlier version wrote to HKCU\System\CurrentControlSet\Control\GameConfigStore, which does not exist and which Windows never reads, so the tweak silently did nothing."; path="HKCU:\System\GameConfigStore"; values=@(@{name="GameDVR_FSEBehaviorMode";type="DWord";on=2;off="__REMOVE__"}, @{name="GameDVR_HonorUserFSEBehaviorMode";type="DWord";on=1;off="__REMOVE__"}, @{name="GameDVR_DXGIHonorFSEWindowsCompatible";type="DWord";on=1;off="__REMOVE__"}, @{name="GameDVR_EFSEFeatureFlags";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Do NOT enable on a modern title that runs well - FSO exists to fix tearing and alt-tab on some GPUs, and forcing it off can make things worse. Turn it on per-game only, and A/B test a borderless-fullscreen benchmark before and after. Safe to leave off (this tweak's default)." ; perf=$true},
+    @{ id="gameDvrOff"; category="Gaming"; label="Disable Game DVR Background Capture"; desc="Stops Windows continuously recording gameplay in the background. Removes a rolling video encode that costs disk writes and a few percent CPU even when you are not recording."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR"; values=@(@{name="AppCaptureEnabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Do NOT enable if you use Xbox Game Bar to record clips, or if you use Steam/GeForce overlay instead - those record independently and are unaffected, so you can enable this safely if you use those instead."; advanced=$true ; perf=$true},
+    @{ id="xboxGameBar"; category="Gaming"; label="Disable Xbox Game Bar Overlay"; desc="Stops the Game Bar overlay from hooking into games. Removes an injected overlay that some titles pay a real framerate cost for and that occasionally causes input lag or crashes on Alt+Tab."; path="HKCU:\SOFTWARE\Microsoft\GameBar"; values=@(@{name="UseNexusForGameBarEnabled";type="DWord";on=0;off="__REMOVE__"}, @{name="ShowStartupPanel";type="DWord";on=0;off="__REMOVE__"}, @{name="AutoGameModeEnabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Do NOT enable if you use Win+G for performance widgets, achievements, or the Xbox Game Bar capture UI. This kills the whole bar, not just capture - use gameDvrOff above if you only want to stop recording." ; perf=$true},
     # --- Network ---
     @{ id="llmnr"; category="Network"; label="Disable LLMNR Name Resolution"; desc="Disables multicast fallback lookups (faster fails, less chatter)."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"; values=@(@{name="EnableMulticast";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="wpad"; category="Network"; label="Disable WPAD Auto-Proxy"; desc="Skips proxy auto-discovery delay on every new connection."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings"; values=@(@{name="AutoDetect";type="DWord";on=0;off=1}); defaultOn=$false; reboot=$false },
     @{ id="smbSigning"; category="Network"; label="Require SMB Signing"; desc="Forces every SMB connection to be cryptographically signed, blocking unsigned relay attacks on a local network. Only affects file shares, not web traffic."; path="HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters"; values=@(@{name="RequireSecuritySignature";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Do NOT enable if you connect to a NAS, an old printer, or a Linux Samba share that does not support signing - those connections will fail outright. Safe on a home network with only Windows machines. Enabling on the SERVER only is a good middle ground." },
     @{ id="smb1Off"; category="Network"; label="Disable SMB1 (Windows 2003 Shares)"; desc="Removes the obsolete SMBv1 protocol, which is unencrypted and is the most commonly abused Windows network service. Stops WannaCry-class exploitation and drops the NT1 cipher."; path="HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters"; values=@(@{name="SMB1";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$true; advanced=$false; verify=$true; caution="Do NOT enable if you still share files with a Windows 7/XP-era machine, an old printer, or a Time Capsule. There is no in-band fallback - those devices simply stop being reachable. Recommended for anyone not actively using ancient hardware." },
-    @{ id="ipv6Tunnels"; category="Network"; label="Disable Teredo / ISATAP / 6to4"; desc="Stops the three Windows tunnel transition technologies from routing IPv6 traffic through public relays. Uses the real control DisabledComponents under Tcpip6 - an earlier version of this entry wrote to a key that does not exist, so it never took effect."; path="HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters"; values=@(@{name="DisabledComponents";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="Do NOT enable if you are on an IPv6-only or CGNAT connection, or behind a VPN that relies on a tunnel adapter. There is a real risk of losing all external connectivity. Check that your provider actually gives you native IPv6 first. Note: on this machine the value is already 1, so this is currently a no-op." },
+    @{ id="ipv6Tunnels"; category="Network"; label="Disable Teredo / ISATAP / 6to4"; desc="Stops the three Windows tunnel transition technologies from routing IPv6 traffic through public relays. Uses the real control DisabledComponents under Tcpip6 - an earlier version of this entry wrote to a key that does not exist, so it never took effect."; path="HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters"; values=@(@{name="DisabledComponents";type="DWord";on=14;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="AUDIT NOTE: this used to write 1. Per Microsoft's bitmask, 0x01 is the umbrella tunnel-interface bit, so it did cover all three - but it is broader than the label implies and also disables IP-TLS and CP interfaces, which breaks DirectAccess. 14 (0x0E) is the precise equivalent: 0x02 6to4 + 0x04 ISATAP + 0x08 Teredo, and nothing else. Also note ISATAP and Teredo are already disabled by default in Windows, so for those two this is a no-op; 6to4 is the only one enabled by default. Microsoft warns a value other than 0 or 32 can stop the Routing and Remote Access service working. Do NOT enable if you are on an IPv6-only or CGNAT connection, or behind a VPN that relies on a tunnel adapter - there is a real risk of losing external connectivity." },
     @{ id="ecnOff"; category="Network"; label="Disable ECN (Explicit Congestion Notification)"; desc="Stops the TCP stack advertising ECN, which adds an extra signalling round-trip when a path reports congestion. Turning it off removes that exchange, so a congested route recovers its send window sooner instead of waiting on markers in the data stream."; path="HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"; values=@(@{name="EnableECN";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="Genuine on long or congested paths, and it is the difference between a path that recovers in one RTT and one that limps along. Do NOT enable if your connection is genuinely congested and you want the gentler behaviour ECN gives the rest of the internet - disabling it makes your traffic more aggressive, not more polite. Little to no effect on a short clean LAN or a wired link with headroom."; advanced=$true },
-    @{ id="tcpWindowSize"; category="Network"; label="Increase TCP Receive Window"; desc="Raises the static TCP window from the default 64KB to 256KB, so more unacknowledged data can be in flight. On a long path the default window is smaller than the bandwidth-delay product, which forces the sender to stall waiting for ACKs."; path="HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"; values=@(@{name="TcpWindowSize";type="DWord";on=262144;off="__REMOVE__"}, @{name="GlobalMaxTcpWindowSize";type="DWord";on=262144;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="Real benefit only where the link is long and the pipe is wide - satellite, cross-continent, or high-speed fibre with latency. On a normal home connection under 100ms it changes nothing measurable, because window scaling already adapts. It does not reduce ping; it reduces throughput stalls on long routes. Do NOT bother enabling it on a local or short-hop link."; advanced=$true },
+    @{ id="tcpWindowSize"; category="Network"; label="Increase TCP Receive Window"; desc="Pins the TCP receive window to 256KB. AUDIT NOTE: read this before trusting the label. On Windows 11 the receive window is governed by Receive Window Auto-Tuning, and Microsoft's own SetTcpWindowSize documentation states this registry entry is not used in the current implementation. GlobalMaxTcpWindowSize, which this entry also used to write, is a legacy name that appears in no current Microsoft documentation and was historically misspelled in Windows itself so that it never took effect. This entry is kept because it does no harm, but expect no measurable change. The supported knob is: netsh int tcp set global autotuninglevel=experimental"; path="HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"; values=@(@{name="TcpWindowSize";type="DWord";on=262144;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="Likely a no-op on Windows 11 because auto-tuning overrides it. If you want a real change, use the netsh autotuninglevel command instead of this toggle. It does not reduce ping either way - it would only affect throughput stalls on very long routes."; advanced=$true },
     @{ id="dohOff"; category="Network"; label="Disable DNS over HTTPS"; desc="Stops Windows from silently routing name lookups through its own encrypted resolver. Without this, Windows can use DoH and bypass the DNS servers set in Network settings, which means the provider you chose is not always the one answering - and that adds variable lookup time."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"; values=@(@{name="EnableDoH";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Safe unless you specifically want DoH for privacy - some people enable it deliberately to stop their ISP seeing lookups. If you set DNS manually in Network settings, leave this on so those servers are the ones actually used. It is about consistency of which resolver answers, not about raw ping." },
     @{ id="nssiProbeOff"; category="Network"; label="Disable Connectivity Check Probes"; desc="Stops Windows periodically broadcasting to the internet to decide whether you are online. Those background probes show up as small periodic connections and can contend with a game on a latency-sensitive link."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator"; values=@(@{name="NoNetworkProbe";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Harmless to leave on. It does not improve ping - it just stops the OS checking. The visible effect is Windows sometimes showing the wrong network icon, because it can no longer tell online from offline reliably. Worth it on metered or very slow links, marginal everywhere else." },
     @{ id="autoDnsSuffixOff"; category="Network"; label="Disable DNS Suffix Search List"; desc="Stops Windows appending each connection's DNS suffix to every lookup that fails, which otherwise turns one failed name into several sequential timeouts before it gives up. Directly reduces tail latency on misspelled or blocked domains."; path="HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"; values=@(@{name="DisableSearchList";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Safe for a home or single-domain machine. Do NOT enable on a corporate network using a search suffix to find internal hosts by short name - unqualified lookups for printers, file shares and internal apps would stop resolving, which is a real breakage rather than a slowdown." },
@@ -742,12 +927,12 @@ $script:RegTweaks = @(
     @{ id="activityFeed"; category="Privacy"; label="Disable Activity History Feed"; desc="Stops Timeline/activity uploads across devices."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"; values=@(@{name="EnableActivityFeed";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="locationSensors"; category="Privacy"; label="Disable Location Sensors"; desc="Turns off location tracking for apps and services."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors"; values=@(@{name="DisableLocation";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="feedbackNotif"; category="Privacy"; label="Disable Feedback Prompts"; desc="Stops Windows begging for feedback with popup notifications."; path="HKCU:\SOFTWARE\Microsoft\Siuf\Rules"; values=@(@{name="NumberOfSIUFInPeriod";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
-    @{ id="allowTelemetry"; category="Privacy"; label="Telemetry to Security-Only"; desc="Drops Windows diagnostic data collection to the minimum level."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection"; values=@(@{name="AllowTelemetry";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
+    @{ id="allowTelemetry"; category="Privacy"; label="Set Telemetry to Off (0)"; desc="Sets the Windows diagnostic-data policy to 0, its lowest level. AUDIT NOTE: this entry was labelled Remove ALL Telemetry, which overstated it on this edition. The AllowTelemetry policy shipped on this build accepts only 0, 1 and 3 - value 2 is not valid on Windows 11. Microsoft also documents diagnostic data OFF as available only on Server, Enterprise and Education, so on Windows 11 Pro the operating system applies an edition floor and you should not expect this to reach 0. Even at 0 the policy governs Windows diagnostic data only: Windows Error Reporting, Online Crash Analysis and Defender or Update traffic are governed separately and are not removed by it."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection"; values=@(@{name="AllowTelemetry";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="diagLogs"; category="Privacy"; label="Limit Diagnostic Log Collection"; desc="Stops extended diagnostic logs from being gathered and sent."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection"; values=@(@{name="LimitDiagnosticLogCollection";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="appAccess"; category="Privacy"; label="Deny Apps Location / Camera Access"; desc="Removes the master 'let apps use your location' permission for every app at once, and blocks camera access for desktop apps that do not need it."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; values=@(@{name="LetAppsAccessLocation";type="DWord";on=0;off="__REMOVE__"}, @{name="LetAppsAccessCamera";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Do NOT enable if you use a phone-mirroring app, a VPN with QR scanning, a video-conferencing tool, or anything that authenticates by camera. This is a blanket deny - it will not ask you, it will just fail. Check your app list first, or enable it and then re-grant per app from Settings." },
     @{ id="webSearchPerms"; category="Privacy"; label="Restrict Web Search Permissions"; desc="Stops apps using your safe-search and content-level settings to filter web results, so a third-party app cannot read or alter your browsing preferences."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"; values=@(@{name="LetAppsAccessWebSearch";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Safe for almost everyone. The only effect is that apps cannot read your SafeSearch setting - your own Edge/Chrome search filtering is completely unaffected." },
     @{ id="inputPersonalization"; category="Privacy"; label="Disable Typing Personalization"; desc="Stops Windows sending your typed words, handwriting samples and clipboard history to Microsoft for text prediction, and stops the on-device dictionary learning."; path="HKCU:\SOFTWARE\Microsoft\Input"; values=@(@{name="IsInputPersonalizationEnabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="You lose handwriting recognition, predictive text and the ability to type by voice in a few dialogs. On a touchscreen laptop, handwriting is the main casualty - do not enable it there unless you have a keyboard." },
-    @{ id="contentDelivery"; category="Privacy"; label="Disable All Suggested Content"; desc="Switches off the whole suggested-content family in one go: lock screen fun facts, Start menu suggestions, and the 'recommended' tiles Windows installs on your behalf."; path="HKCU:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"; values=@(@{name="DisableWindowsSpotlightFeatures";type="DWord";on=1;off="__REMOVE__"}, @{name="DisableTailoredExperiencesWithDiagnosticDataEnabled";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Safe. This is advertising, not functionality - nothing you rely on stops working. One of the highest value-to-risk ratio privacy tweaks available." },
+    @{ id="contentDelivery"; category="Privacy"; label="Disable All Suggested Content"; desc="Switches off the whole suggested-content family in one go: lock screen fun facts, Start menu suggestions, and the 'recommended' tiles Windows installs on your behalf."; path="HKCU:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"; values=@(@{name="DisableWindowsSpotlightFeatures";type="DWord";on=1;off="__REMOVE__"}, @{name="DisableTailoredExperiencesWithDiagnosticData";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Safe. This is advertising, not functionality - nothing you rely on stops working. One of the highest value-to-risk ratio privacy tweaks available. AUDIT NOTE: the second value here used to be DisableTailoredExperiencesWithDiagnosticDataEnabled, which matches no policy on this build. CloudContent.admx defines DisableTailoredExperiencesWithDiagnosticData with no Enabled suffix, and the previous name was a hybrid of that policy and the unrelated HKCU\\CurrentVersion\\Privacy toggle." },
     @{ id="recentDocs"; category="Privacy"; label="Don't Track Recent Documents"; desc="Stops Windows keeping a history of opened documents."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer"; values=@(@{name="NoRecentDocsHistory";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     # --- Interface ---
     @{ id="winAnimations"; category="Interface"; label="Disable Window Animations"; desc="Removes minimize/maximize animation lag across the shell."; path="HKCU:\Control Panel\Desktop\WindowMetrics"; values=@(@{name="MinAnimate";type="String";on="0";off="1"}); defaultOn=$false; reboot=$false },
@@ -767,38 +952,45 @@ $script:RegTweaks = @(
     @{ id="taskbarCopilot"; category="Interface"; label="Remove Copilot Button"; desc="Takes the Copilot button off the taskbar."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; values=@(@{name="ShowCopilotButton";type="DWord";on=0;off=1}); defaultOn=$false; reboot=$false },
     @{ id="taskbarEndTask"; category="Interface"; label="End-Task on Right-Click"; desc="Adds 'End task' to taskbar app right-click menus (Win11)."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings"; values=@(@{name="TaskbarEndTask";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="launchToPC"; category="Interface"; label="Open Explorer to This PC"; desc="Explorer opens on drives instead of Quick Access."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; values=@(@{name="LaunchTo";type="DWord";on=1;off=2}); defaultOn=$false; reboot=$false },
-    @{ id="clockSeconds"; category="Interface"; label="Clock Seconds"; desc="Shows seconds in the taskbar clock."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; values=@(@{name="ShowSecondsInSystemClock";type="DWord";on=1;off=0}); defaultOn=$false; reboot=$false },
-    @{ id="altTabClassic"; category="Interface"; label="Classic Alt+Tab Dialog"; desc="Restores the instant classic app-switcher instead of the fancy one."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer"; values=@(@{name="AltTabSettings";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="aeroPeek"; category="Interface"; label="Disable Aero Peek"; desc="Stops the desktop-preview hover effect using DWM resources."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; values=@(@{name="DisablePreviewDesktop";type="DWord";on=1;off=0}); defaultOn=$false; reboot=$false },
     @{ id="dragWindows"; category="Interface"; label="Don't Render While Dragging"; desc="Shows only window outlines while dragging (less DWM work)."; path="HKCU:\Control Panel\Desktop"; values=@(@{name="DragFullWindows";type="String";on="0";off="1"}); defaultOn=$false; reboot=$false },
     @{ id="darkMode"; category="Interface"; label="Force Dark Mode"; desc="Applies the dark theme to apps that do not have their own dark setting, so the whole system stops flashing white windows."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize"; values=@(@{name="AppsUseLightTheme";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Safe, and reversible from Settings at any time. Some older apps with hardcoded light palettes render unreadable - those are the only ones affected." },
     @{ id="combineAlwaysHide"; category="Interface"; label="Never Combine Taskbar Buttons"; desc="Stops the taskbar grouping icons entirely. Each running app keeps its own labelled button, so you can see everything open at a glance instead of one numbered icon."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; values=@(@{name="TaskbarNoCombine";type="DWord";on=2;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Do NOT enable if you habitually run more than about six windows at once - the taskbar will overflow and start hiding buttons behind the overflow chevron, which is worse than grouping." },
     @{ id="taskbarSmall"; category="Interface"; label="Use Small Taskbar Buttons"; desc="Shrinks the taskbar height, returning roughly 10px of screen height. Windows 11 defaults to the large taskbar, which wastes vertical space on a 1080p display."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; values=@(@{name="TaskbarSi";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Safe. Only do this if you are on 1080p and feel the taskbar is oversized. On a laptop with a 13-inch 720p panel the large taskbar is actually easier to hit, so leave it." },
-    @{ id="networkDriveIcon"; category="Interface"; label="Show Mapped Network Drives"; desc="Removes the mapped-network-drive overlay shortcut that Explorer injects into This PC, so your drive list shows only real local disks."; path="HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"; values=@(@{name="NoNetworkDriveShowInThisPC";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Do NOT enable if you use a mapped drive letter and rely on seeing it in This PC - you will still be able to reach it by typing the path, but it vanishes from the sidebar and This PC listing." },
+    @{ id="networkDriveIcon"; category="Interface"; label="Hide Mapped Network Drives from This PC"; desc="Removes the mapped-network-drive overlay shortcut that Explorer injects into This PC, so your drive list shows only real local disks."; path="HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"; values=@(@{name="NoNetworkDriveShowInThisPC";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Do NOT enable if you use a mapped drive letter and rely on seeing it in This PC - you will still be able to reach it by typing the path, but it vanishes from the sidebar and This PC listing." },
     # --- System ---
     @{ id="keyRepeat"; category="System"; label="Fastest Key Repeat"; desc="Max keyboard repeat rate and minimum delay for rapid input."; path="HKCU:\Control Panel\Keyboard"; values=@(@{name="KeyboardSpeed";type="String";on="31";off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="numLock"; category="System"; label="NumLock On at Boot"; desc="Keeps the numpad enabled on the login screen and after boot."; path="HKCU:\Control Panel\Keyboard"; values=@(@{name="InitialKeyboardIndicators";type="String";on="2";off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="autoplay"; category="System"; label="Disable AutoPlay"; desc="Stops USB/discs auto-launching anything when plugged in."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer"; values=@(@{name="NoDriveTypeAutoRun";type="DWord";on=255;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="remoteAssist"; category="System"; label="Disable Remote Assistance"; desc="Closes the inbound remote-help attack surface."; path="HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"; values=@(@{name="fAllowToGetHelp";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
-    @{ id="powerThrottling"; category="System"; label="Disable Power Throttling"; desc="Stops Windows down-clocking background work (consistent performance)."; path="HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling"; values=@(@{name="PowerThrottlingOff";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
+    @{ id="powerThrottling"; category="System"; label="Disable Power Throttling"; desc="Stops Windows down-clocking background work (consistent performance)."; path="HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling"; values=@(@{name="PowerThrottlingOff";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false ; perf=$true},
     @{ id="longPaths"; category="System"; label="Enable Long File Paths"; desc="Removes the 260-character path limit for apps and games."; path="HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem"; values=@(@{name="LongPathsEnabled";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="shortNames"; category="System"; label="Disable 8.3 Short Filenames"; desc="Stops NTFS maintaining legacy short names (faster file creation)."; path="HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem"; values=@(@{name="NtfsDisable8dot3NameCreation";type="DWord";on=1;off=2}); defaultOn=$false; reboot=$false; advanced=$true; caution="Do NOT enable if any software you run still creates or looks up 8.3 names - some older installers, and certain network shares, depend on them. Mostly safe on a modern single-user machine." },
     @{ id="lastAccess"; category="System"; label="Disable Last-Access Tracking"; desc="Stops NTFS timestamping every file read (less disk I/O)."; path="HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem"; values=@(@{name="NtfsDisableLastAccessUpdate";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Almost always safe and worth it. The only cost is that NTFS last-access timestamps stop updating, so Recently Used lists and some backup tools that rely on access time will be less accurate." },
-    @{ id="cpuMitigations"; category="System"; label="Disable CPU Side-Channel Mitigations"; desc="Turns off Spectre/Meltdown software mitigations for raw speed. Weakens security - your call."; path="HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"; values=@(@{name="FeatureSettingsOverride";type="DWord";on=3;off="__REMOVE__"}, @{name="FeatureSettingsOverrideMask";type="DWord";on=3;off="__REMOVE__"}); defaultOn=$false; reboot=$true; advanced=$true; caution="Reduces your security posture meaningfully. Do NOT enable on a machine that browses untrusted sites, runs untrusted downloads, or develops against untrusted dependencies - you lose Spectre/Meltdown class protection. Enable only on a dedicated offline gaming rig, and only after measuring a real stutter win. Expect single-digit percent at best; the folklore numbers are not real." },
-    @{ id="vbsOff"; category="System"; label="Disable Virtualization-Based Security"; desc="Turns off VBS for lower overhead in CPU-bound games. Weakens security - your call."; path="HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard"; values=@(@{name="EnableVirtualizationBasedSecurity";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$true; advanced=$true; caution="Do NOT enable if you use Windows Hello, Defender Credential Guard, or BitLocker - all three depend on VBS and will break. Also removes the hypervisor-enforced isolation that stops kernel-level malware. Only for an offline gaming machine that measures a real gain." },
-    @{ id="hvciOff"; category="System"; label="Disable Memory Integrity (HVCI)"; desc="Turns off hypervisor-protected code integrity for less overhead. Weakens security - your call."; path="HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"; values=@(@{name="Enabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$true; advanced=$true; caution="Do NOT enable if you run untrusted code. This is the control that stops a compromised driver injecting into kernel memory. Only reasonable on a sealed, offline machine." },
+    @{ id="cpuMitigations"; category="System"; label="Disable CPU Side-Channel Mitigations"; desc="Turns off the Spectre v2 and Meltdown software mitigations for raw speed. Weakens security - your call."; path="HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"; values=@(@{name="FeatureSettingsOverride";type="DWord";on=3;off="__REMOVE__"}, @{name="FeatureSettingsOverrideMask";type="DWord";on=3;off="__REMOVE__"}); defaultOn=$false; reboot=$true; advanced=$true; caution="AUDIT NOTE: the value 3 is correct - Microsoft documents that bit 0 is CVE-2017-5715 (Spectre v2) and bit 1 is CVE-2017-5754 (Meltdown), that a set bit DISABLES the mitigation, and that /d 3 is its own published command. But the LABEL was too broad. This does NOT disable Spectre v1, which Microsoft states has no disable option at all, and it leaves MDS, SSBD, L1TF/MMIO, TAA, AMD BTC/RAP and Intel BHI enabled. Expect single-digit percent at best; the folklore numbers are not real." ; perf=$true},
+    @{ id="vbsOff"; category="System"; label="Disable Virtualization-Based Security"; desc="Turns off VBS for lower overhead in CPU-bound games. Weakens security - your call."; path="HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard"; values=@(@{name="EnableVirtualizationBasedSecurity";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$true; advanced=$true; caution="Do NOT enable if you use Windows Hello, Defender Credential Guard, or BitLocker - all three depend on VBS and will break. Also removes the hypervisor-enforced isolation that stops kernel-level malware. Only for an offline gaming machine that measures a real gain." ; perf=$true},
+    @{ id="hvciOff"; category="System"; label="Disable Memory Integrity (HVCI)"; desc="Turns off hypervisor-protected code integrity for less overhead. Weakens security - your call."; path="HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"; values=@(@{name="Enabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$true; advanced=$true; caution="Do NOT enable if you run untrusted code. This is the control that stops a compromised driver injecting into kernel memory. Only reasonable on a sealed, offline machine." ; perf=$true},
     @{ id="fastStartup"; category="System"; label="Disable Fast Startup"; desc="Full shutdown every time - avoids stale-driver and dual-boot issues."; path="HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power"; values=@(@{name="HiberbootEnabled";type="DWord";on=0;off=1}); defaultOn=$false; reboot=$false; caution="Not a speedup - it is a correctness fix. Enable it if you have ever had USB or driver problems after a shutdown, or dual-boot and find the second OS unable to mount the disk. It makes shutdown marginally slower and boot marginally slower." },
     @{ id="lockAds"; category="System"; label="Disable Lock Screen Ads"; desc="Kills spotlight promos and fun-fact overlays on the lock screen."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"; values=@(@{name="RotatingLockScreenEnabled";type="DWord";on=0;off="__REMOVE__"}, @{name="RotatingLockScreenOverlayEnabled";type="DWord";on=0;off="__REMOVE__"}, @{name="SubscribedContent-338387Enabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
-    @{ id="timerResolution"; category="System"; label="Allow Global Timer Resolution Requests"; desc="Lets applications that ask for a high-resolution system timer actually get one, instead of Windows clamping them to the default 15.6ms tick. It does NOT raise the tick on its own - a program has to request it."; path="HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel"; values=@(@{name="GlobalTimerResolutionRequests";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="Corrected after review: the old description claimed this forces a 0.5ms timer period, which is false. GlobalTimerResolutionRequests only PERMITS global requests; without a program asking, the resolution does not change. GAMMA caught this. Do NOT enable on a laptop expecting input latency gains - the effect is workload-dependent and usually small, and permitting high-resolution timers costs a little power." },
-    @{ id="multimediaScheduling"; category="System"; label="Remove Multimedia Throttle Reservation"; desc="Removes the 20 percent CPU reservation that MMCSS holds back for multimedia work, so audio and video threads are not preempted by background load. Only the one value at its documented location is written - an earlier version also wrote NoLazyMode and GPU Priority under SystemProfile, where they do nothing."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; values=@(@{name="SystemResponsiveness";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Mildly risky on a slow machine - removing the reservation lets media threads take CPU the desktop wanted, which can starve the UI if a decode stalls. If audio ever crackles after enabling, this is the first thing to revert."; advanced=$true },
+    @{ id="timerResolution"; category="System"; label="Allow Global Timer Resolution Requests"; desc="Lets applications that ask for a high-resolution system timer actually get one, instead of Windows clamping them to the default 15.6ms tick. It does NOT raise the tick on its own - a program has to request it."; path="HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel"; values=@(@{name="GlobalTimerResolutionRequests";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="Corrected after review: the old description claimed this forces a 0.5ms timer period, which is false. GlobalTimerResolutionRequests only PERMITS global requests; without a program asking, the resolution does not change. GAMMA caught this. Do NOT enable on a laptop expecting input latency gains - the effect is workload-dependent and usually small, and permitting high-resolution timers costs a little power." ; perf=$true},
+        @{ id="mmcsWin32Priority"; category="Gaming"; label="Processor Allocation: Programs vs Background Services"; desc="Win32PrioritySeparation, the first control in the Windows performance dialog. Programs gives foreground apps a much larger share of quantum than background services, which is what you want when gaming. Real, but it only reweights the legacy scheduler quantum - it does not reorder threads outside MMCSS. Windows reads this under Control\PriorityControl, NOT under Multimedia\SystemProfile, so that is where it is written; an earlier version wrote a copy under SystemProfile that Windows ignored entirely."; path="HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; type="enum"; valueName="Win32PrioritySeparation"; options=@(@{v=38;l="Programs - 0x26 (recommended for gaming)"},@{v=24;l="Background services - 0x18"},@{v=18;l="Short background quantum - 0x12"},@{v="unset";l="Windows default (unset)"}); defaultValue=0; reboot=$true; perf=$true; caution="0x26 is also the Windows default, so this only matters if something moved it. This reweights the legacy scheduler quantum only - modern games run at a higher base priority and largely ignore it." },
+    @{ id="mmcsSystemResponsiveness"; category="Gaming"; label="System Responsiveness for Games"; desc="Clears the 20 percent of CPU that MMCSS holds back for multimedia background work, so a game is preempted less. Choose Off - it is the best setting for gaming. This one is a genuine, well-understood MMCSS control rather than folklore."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; type="enum"; valueName="SystemResponsiveness"; options=@(@{v=0;l="Off (recommended)"},@{v=1;l="On"},@{v="unset";l="Windows default (unset)"}); defaultValue=0; reboot=$true; perf=$true },
+    @{ id="mmcsCpuPriority"; category="Gaming"; label="CPU Priority for Gaming"; desc="The MMCSS Games task priority, Tasks\Games\Priority. Choose High - 6 on the documented 1 to 8 scale, where 8 is highest. An earlier version wrote a value called Taskscheduler under Multimedia\SystemProfile, which is not a location Windows reads for game scheduling, so it did nothing."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; type="enum"; valueName="Priority"; options=@(@{v=6;l="High - 6 (recommended)"},@{v=8;l="Highest - 8"},@{v=4;l="Medium - 4"},@{v=2;l="Low - 2 (Windows default)"},@{v="unset";l="Windows default (unset)"}); defaultValue=2; reboot=$true; perf=$true; caution="IMPORTANT INTERACTION: this value is ignored entirely while Scheduling Category on this same task is set to High - Microsoft documents that such tasks are always treated as 2. That is the case on a stock machine, so set Scheduling Category above to Medium for this number to take any effect." },
+    @{ id="mmcsSchedulingCategory"; category="Gaming"; label="Scheduling Category for Gaming"; desc="Scheduling Category, the MMCSS Games task category. This is NOT a number - it is the text value High, Medium or Low on the Games task. Choose Medium, counterintuitively: Microsoft documents that when Scheduling Category is High the task Priority is always treated as 2, so setting this to High silently cancels out the CPU Priority entry above."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; type="enum"; valueName="Scheduling Category"; valueType="String"; options=@(@{v="Medium";l="Medium (recommended - lets Priority apply)"},@{v="High";l="High - forces Priority to 2"},@{v="Low";l="Low"},@{v="unset";l="Windows default (unset)"}); defaultValue=0; reboot=$true; perf=$true; caution="Text, not a number. Choosing High here undoes the CPU Priority entry: Windows treats any task with a High scheduling category as Priority 2 no matter what Priority says." },
+    @{ id="mmcsGpuPriority"; category="Gaming"; label="GPU Priority for Gaming"; desc="The MMCSS Games GPU priority, Tasks\Games\GPU Priority. Choose High - 8 on the documented 0 to 31 scale. An earlier version wrote a value called GPUPriority under Multimedia\SystemProfile, using a signed -2 to 2 scale that Windows does not read; the real value is this one."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; type="enum"; valueName="GPU Priority"; options=@(@{v=8;l="High - 8 (recommended)"},@{v=16;l="Very high - 16"},@{v=4;l="Medium - 4"},@{v=2;l="Low - 2 (Windows default)"},@{v="unset";l="Windows default (unset)"}); defaultValue=2; reboot=$true; perf=$true; caution="Microsoft's public documentation lists this priority as NOT YET USED. That is not the same as unused, though - Microsoft does not document everything, and GPU scheduling is exactly the sort of internal plumbing that gets wired up without appearing in the public docs. No one has measured it either way. What is certain is that it now writes to the correct key with the correct 0 to 31 scale, so it is at least in the right place. Treat it as unverified rather than proven or disproven." },
+    @{ id="svcHostSplitThreshold"; category="Gaming"; label="Svchost Split Threshold"; desc="The memory level at which Windows decides whether to split services into separate svchost.exe processes. Choose 4 GB up to 64 GB. Set it at or above your own installed memory and Windows will not split at all, so fewer service groups share a process. Windows reads this under Session Manager\Memory Management, NOT under Multimedia\SystemProfile, so that is where it is written; an earlier version wrote a copy under SystemProfile that Windows ignored entirely."; path="HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"; type="enum"; valueName="SvcHostSplitThreshold"; options=@(@{v=4;l="4 GB"},@{v=8;l="8 GB"},@{v=16;l="16 GB"},@{v=32;l="32 GB"},@{v=64;l="64 GB"},@{v="unset";l="Windows default (unset)"}); defaultValue=0; reboot=$true; perf=$true; caution="A modest reduction in process count, not a headline win. Higher than your RAM means Windows never splits, concentrating services rather than spreading them. This key was never actually set anywhere Windows reads before this fix, so the value you saw in the dropdown previously was not in effect." },
+    @{ id="multimediaScheduling"; category="System"; label="Remove Multimedia Throttle Reservation"; desc="Removes the 20 percent CPU reservation that MMCSS holds back for multimedia work, so audio and video threads are not preempted by background load. Only the one value at its documented location is written - an earlier version also wrote NoLazyMode and GPU Priority under SystemProfile, where they do nothing."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; values=@(@{name="SystemResponsiveness";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Mildly risky on a slow machine - removing the reservation lets media threads take CPU the desktop wanted, which can starve the UI if a decode stalls. If audio ever crackles after enabling, this is the first thing to revert."; advanced=$true ; perf=$true},
+@{ id="sysmainMode"; category="System"; label="SysMain Service (Superfetch)"; desc="SysMain, formerly called Superfetch, preloads frequently used applications and files into RAM so they launch faster, and keeps a map of which data is actually in use. On an SSD it gives little or no benefit, because the drive is already fast enough that preloading costs more than it saves, while the service keeps consuming RAM and generating background disk and CPU work. Recommended for SSD users only: disable it. On a mechanical hard drive keep it on Manual, which still prefetches on demand without the constant background scanning."; path="HKLM:\SYSTEM\CurrentControlSet\Services\SysMain"; type="enum"; valueName="Start"; options=@(@{v=4;l="Disabled (Recommended for SSD)"},@{v=3;l="Manual - only on demand"},@{v=2;l="Automatic - constant prefetch"}); defaultValue=2; reboot=$false; perf=$true; advanced=$true; caution="Recommended for SSD users only. On a mechanical hard drive, switching this from Automatic to Disabled will noticeably slow cold application launches, because keeping recently used data in RAM is the entire job of this service. Start type values follow the documented Windows scheme: 0 Boot, 1 System, 2 Automatic, 3 Manual, 4 Disabled. The change applies the next time the service is started; SysMain is currently stopped, so no reboot is needed. MOVED here from the Debloater so it has exactly one home - the old services-tab toggle for SysMain has been removed to avoid two controls fighting over the same value." },
+@{ id="mpoOff"; category="System"; label="Disable Multi-Plane Overlay (MPO)"; desc="Windows composites multiple display layers in hardware using the GPU. On multi-monitor setups, hybrid laptops and some driver/GPU combinations this causes flickering, black screens on alt-tab, and stuttering. Disabling MPO makes the desktop compositor draw in the classic way. This is a display workaround, not a speed tweak - leave it off unless you are actually seeing flicker or black screens."; path="HKLM:\SOFTWARE\Microsoft\Windows\Dwm"; values=@(@{name="OverlayTestMode";type="DWord";on=5;off="__REMOVE__"}); defaultOn=$false; reboot=$true; perf=$true; advanced=$true; verify=$true; caution="Read this before enabling. OverlayTestMode is NOT documented by Microsoft - it appears in no ADMX on this build and has no Microsoft Learn page - and the value 5 meaning 'MPO off' is community consensus, not an official enumeration. Two paths circulate for it; this writes the SOFTWARE\Microsoft\Windows\Dwm one, because that is the key DWM actually reads on this machine and the Control\Dwm variant does not exist here. It is already set to 5 on this PC, so this toggle will read ON from the start. A reboot is required. If you see no change, that is expected on some 24H2 and newer builds where DWM appears to ignore these flags." },
+@{ id="servicesTimeout"; category="System"; label="Optimize Background Services"; desc="Shortens the Service Control Manager timeout for services that are starting during boot, from 60 seconds to 30. A service that is slow to start can stall the boot sequence behind it, so a shorter ceiling means Windows stops waiting on a hung service and carries on bringing up the rest of the system. This can speed up boot time slightly."; path="HKLM:\SYSTEM\CurrentControlSet\Control"; values=@(@{name="ServicesTimeout";type="DWord";on=30;off="__REMOVE__"}); defaultOn=$false; reboot=$true; perf=$true; advanced=$true; verify=$true; caution="Honest caveat before you enable: ServicesTimeout is undocumented - no ADMX on this build, no Microsoft Learn page - although services.exe does read it. The value is in SECONDS, so 30 is 30 seconds; 30000 would mean 8 hours 20 minutes. The nearby, genuinely documented value is ServicesPipeTimeout (also under Control, but in MILLISECONDS), and on this PC it is already at 30000, which is 30 seconds, the documented default. So the documented timeout is already at the number this tweak is aiming for, and you may measure no difference. A reboot is required for either to take effect." },
     # --- Updates ---
     @{ id="wuNoAutoReboot"; category="Updates"; label="No Forced Reboot After Updates"; desc="Windows Update never restarts your PC while you're logged in."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"; values=@(@{name="NoAutoRebootWithLoggedOnUsers";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="wuDrivers"; category="Updates"; label="Stop Driver Updates via Windows Update"; desc="Keeps your hand-picked GPU/chipset drivers from being overwritten."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"; values=@(@{name="ExcludeWUDriversInQualityUpdate";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="consumerFeatures"; category="Updates"; label="Block Consumer Bloat Reinstalls"; desc="Stops Windows re-adding suggested apps after updates."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"; values=@(@{name="DisableWindowsConsumerFeatures";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="oneDriveSync"; category="Updates"; label="Disable OneDrive File Sync"; desc="Stops OneDrive syncing (frees CPU, RAM and upload bandwidth)."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive"; values=@(@{name="DisableFileSyncNGSC";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Do NOT enable if you use OneDrive for file sync, backup across devices, or offline Files On-Demand. Turning this off silently stops syncing and you can get partial-sync conflicts. Use it only for a fixed gaming/workstation machine that never syncs." },
-    @{ id="optionalUpdates"; category="Updates"; label="Disable Optional / Driver Updates"; desc="Stops Windows Update offering optional features, preview builds and driver bundles, so it only installs what it considers required."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"; values=@(@{name="SetOptionalQualityState";type="DWord";on=2;off="__REMOVE__"}, @{name="SetOptionalContentState";type="DWord";on=2;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Safe and recommended. The trade-off is that you will never be offered a new driver through Windows Update again, so you own driver updates for your GPU. Pair it with wuDrivers above, which stops only driver packages from being pushed while leaving security updates intact." },
+    @{ id="optionalUpdates"; category="Updates"; label="Disable Optional / Driver Updates"; desc="Stops Windows Update offering optional features, preview builds and driver bundles, so it only installs what it considers required."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"; values=@(@{name="SetAllowOptionalContent";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Safe and recommended. The trade-off is that you will never be offered a new driver through Windows Update again, so you own driver updates for your GPU. Pair it with wuDrivers above, which stops only driver packages from being pushed while leaving security updates intact. AUDIT NOTE: this entry used to write SetOptionalQualityState and SetOptionalContentState, neither of which exists in any ADMX on this build, and the data 2 meant the OPPOSITE of the label. The real policy is SetAllowOptionalContent, where the shipped ADMX defines 0 as disabled and 1 as enabled." },
     @{ id="deliveryOptBandwidth"; category="Updates"; label="Cap Windows Update Bandwidth"; desc="Limits Windows so it can never use more than 20% of your measured bandwidth for downloads. Stops a large update from saturating the link while you are gaming or on a call."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"; values=@(@{name="BandwidthLimit";type="DWord";on=20;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Safe. Updates just take longer. Only worth enabling if you have noticed a large cumulative update causing lag spikes on a capped or slow connection."; advanced=$true },
-    @{ id="deliveryOptOff"; category="Updates"; label="Completely Disable Delivery Optimization"; desc="Turns Delivery Optimization off entirely rather than tuning it. Stops Windows using your machine to distribute and receive update payloads from other PCs, and stops the DoSvc service doing background work on your connection. Windows Update itself still works - it just downloads directly from Microsoft instead."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"; values=@(@{name="DownloadMode";type="DWord";on=0;off="__REMOVE__"}, @{name="DODownloadMode";type="DWord";on=100;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="Genuine win on privacy and idle network use, since you stop being a P2P node. Do NOT enable if you are on a slow or metered connection - Delivery Optimization is how Windows fetches update payloads from nearby machines instead of Microsoft's servers, so disabling it can make large updates considerably slower to download. If you only want to stop being an upload node rather than disable it, deliveryOptBandwidth caps bandwidth without that trade-off."; advanced=$true },
+    @{ id="deliveryOptOff"; category="Updates"; label="Disable Delivery Optimization"; desc="Stops Windows using your machine as a Delivery Optimization peer, so DoSvc does no background upload or download work on your connection. Windows Update still works - it fetches directly from Microsoft."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"; values=@(@{name="DODownloadMode";type="DWord";on=99;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="AUDIT NOTE: this entry used to write DODownloadMode=100 as well as a value literally named DownloadMode. Two problems with that. 100 is Bypass, which Microsoft deprecated in Windows 11 because it can cause content to fail to download - it does not switch Delivery Optimization off, it reroutes to BITS. And DownloadMode is the ADMX POLICY name; the registry value name is DODownloadMode, so writing both stated two opposite intents at one key. The shipped DeliveryOptimization.admx maps DownloadMode to the valueName DODownloadMode. This now uses 99, which is Simple mode: no peer-to-peer and no use of the DO cloud service, without the deprecated Bypass behaviour."; advanced=$true },
 
     # --- AI FEATURES (WinTool-style: everything Windows forces on you) ---
     # Grouped last, on purpose: these are the most likely to be reverted by a
@@ -808,7 +1000,7 @@ $script:RegTweaks = @(
     @{ id="aiCortana"; category="AI Features"; label="Disable Cortana"; desc="Removes Cortana from the shell and stops it indexing your files, calendar and microphone input. Frees the background indexing that runs continuously once Cortana is signed in."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; values=@(@{name="AllowCortana";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="Safe unless you use voice to set reminders, or Windows Search for people/calendar. Note the search box itself keeps working - only the Cortana half is removed." },
     @{ id="aiBingSearch"; category="AI Features"; label="Disable Bing in Start Search"; desc="Forces Start menu and taskbar search to answer from the local index only. No query ever leaves the machine, and results stop waiting on a web round-trip."; path="HKCU:\Software\Microsoft\Windows\CurrentVersion\Search"; values=@(@{name="BingSearchEnabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; advanced=$false; caution="Do NOT enable if you rely on web answers in the Start box, for example searching a product and expecting a price. Local app/file search is unaffected and still works." },
     @{ id="aiEdgeFeatures"; category="AI Features"; label="Disable Edge AI Features"; desc="Turns off the AI-powered features in Edge - the sidebar assistant, page summary, and the new-tab content generation - without blocking normal browsing."; path="HKLM:\SOFTWARE\Policies\Microsoft\Edge"; values=@(@{name="AIControllerEnabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; verify=$true; caution="Do NOT enable if you use the Copilot sidebar or page summarisation in Edge. Only affects AI features - normal tabs, extensions and passwords are untouched." },
-    @{ id="aiOfficeCopilot"; category="AI Features"; label="Disable Copilot in Microsoft 365"; desc="Blocks the Copilot button and AI writing assistance inside Word, Excel, Outlook and PowerPoint. Stops the add-in being loaded into every Office document session."; path="HKCU:\Software\Policies\Microsoft\office\16.0\common\General"; values=@(@{name="DisableOfficeCopilot";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; verify=$true; caution="Do NOT enable if you use Copilot in Office for drafting or summarising - this is a policy, not a preference, and there is no in-app way to get it back without reversing the registry value." },
+    @{ id="aiOfficeCopilot"; category="AI Features"; label="Disable Copilot in Microsoft 365"; desc="Blocks Copilot and other connected AI features inside Word, Excel, Outlook, PowerPoint and OneNote. Uses the usercontentdisabled policy under the Office privacy key, which is what Microsoft documents for turning off connected experiences that analyse your content."; path="HKCU:\Software\Policies\Microsoft\office\16.0\common\privacy"; values=@(@{name="usercontentdisabled";type="DWord";on=2;off="__REMOVE__"}); defaultOn=$false; reboot=$false; verify=$true; caution="Do NOT enable if you use Copilot in Office for drafting or summarising - this is a policy, not a preference, and there is no in-app way to get it back without reversing the registry value. AUDIT NOTE: this used to write DisableOfficeCopilot at ...\\common\\General, and no Microsoft policy of that name exists in any ADMX on this build. Note Office INVERTS the convention compared with Windows: here 1 means enabled and 2 means disabled. There is no Office installation on this PC, so this cannot be verified locally." },
     @{ id="aiTeamsChat"; category="AI Features"; label="Disable Teams Chat and AI Assistants"; desc="Turns off the built-in Teams chat surface and its AI assistant, removing the chat payload the shell downloads and keeps resident."; path="HKLM:\SOFTWARE\Policies\Microsoft\Teams"; values=@(@{name="EnableChat";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; verify=$true; caution="Do NOT enable if your organisation uses Teams for chat - the personal Teams app is separate but the shell chat entry point is not, so you may lose chat entirely rather than just the AI part." },
     @{ id="aiClickToDo"; category="AI Features"; label="Disable Click to Do"; desc="Stops the on-screen AI prompt that appears over screenshots and lets you run an action on whatever is in view. Removes a screenshot-analysis pass that runs on captured screen content."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI"; values=@(@{name="DisableClickToDo";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$true; verify=$true; caution="Safe if you never use it - it is opt-in on each capture. Do enable if you care about screen capture being analysed by on-device models." },
     @{ id="aiStudioEffects"; category="AI Features"; label="Disable AI Studio Effects"; desc="Disables the camera pipeline features that are entirely neural: background blur, eye contact correction, auto framing and voice focus. Uses the plain camera path instead."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI"; values=@(@{name="DisableAIVideoEffects";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$true; verify=$true; caution="Do NOT enable if you rely on background blur or eye contact in video calls - the replacement is a flat, unprocessed feed. Leave it alone if you have no AI-PC NPU and these already do nothing." },
@@ -816,12 +1008,102 @@ $script:RegTweaks = @(
     @{ id="aiCopilotTips"; category="AI Features"; label="Disable Copilot Tips and AI Prompts"; desc="Stops the contextual AI suggestions, 'try asking Copilot' prompts and AI-powered tips appearing in Settings, Start and the shell."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot"; values=@(@{name="DisableAIPrompt";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; verify=$true; caution="Safe - these are suggestions, not functionality. Useful if you find the prompts distracting rather than if you want performance." }
 )
 
+# Installed physical memory in whole GB.
+#
+# Uses Win32_PhysicalMemory capacity rather than Win32_ComputerSystem's
+# TotalPhysicalMemory. The latter is what is actually usable, so on a 32 GB board
+# it reports about 30.88 and the threshold would land on a value Windows never
+# offers in its own dropdown. Installed capacity gives 32, which is the number
+# the user sees on the box and the one the dialog lists.
+function Get-InstalledRamGB {
+    $caps = (Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue | Measure-Object -Property Capacity -Sum).Sum
+    if ($caps -and $caps -gt 0) { return [int][math]::Round($caps / 1GB) }
+    $tp = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory
+    if ($tp -and $tp -gt 0) { return [int][math]::Round($tp / 1GB) }
+    return $null
+}
+
+# Resolves a value's target. The catalog is static, so a tweak whose correct
+# value depends on the machine carries onFromRam = $true instead of a literal.
+function Get-TweakTargetValue($v) {
+    if ($v.onFromRam) {
+        $gb = Get-InstalledRamGB
+        if ($gb) { return $gb }
+    }
+    return $v.on
+}
+# Enum tweaks (a dropdown rather than a toggle) read a single named value.
+# Returns $null when the value has never been written, which the UI renders as
+# the Windows-default option rather than as 0 - 0 is a real choice here, so the
+# two must not collapse into each other.
+function Get-RegTweakValue($def) {
+    if (-not $def.valueName) { return $null }
+    $v = (Get-ItemProperty -Path $def.path -Name $def.valueName -ErrorAction SilentlyContinue).($def.valueName)
+    if ($null -eq $v) { return $null }
+    # MMCSS is not all numeric. Tasks\Games "Scheduling Category" and
+    # "SFIO Priority" are REG_SZ strings ("High"/"Medium"/"Low" and
+    # "Idle"/"Low"/"Normal"/"High"), so they are read back as text. Coercing
+    # them through [int] would turn "High" into 0 and compare it against numeric
+    # option lists that no longer describe the real registry.
+    if ($def.valueType -eq 'String') { return [string]$v }
+    # A DWORD comes back UNSIGNED. Writing the signed MMCSS value -1 (High) to a
+    # DWORD stores the bits 0xFFFFFFFF, which Get-ItemProperty surfaces as
+    # 4294967295. Casting that straight to [int] THROWS in PowerShell 5.1
+    # ("Value was either too large or too small for an Int32"), which killed the
+    # read-back and left the dropdown with no matching option - so selecting High
+    # silently reverted. Reinterpret through int64 instead: subtract 2^32 for any
+    # value with the sign bit set. Option lists hold signed values, so this is the
+    # form both the comparison and the UI need.
+    $iv = [int64]$v
+    if ($iv -ge 2147483648) { $iv -= 4294967296 }
+    if ($iv -lt -2147483648 -or $iv -gt 2147483647) { return $null }
+    return [int]$iv
+}
+
+function Set-RegTweakValue($def, $value) {
+    # "unset" is the explicit "Windows default" sentinel, meaning delete the value.
+    #
+    # This sentinel used to be the number -1. That was wrong: -1 collided with a
+    # legitimate value, so the option that meant "High" instead DELETED the
+    # registry value, and the dropdown then had to relabel a worse number as
+    # "High" to compensate. The sentinel is now the non-numeric string "unset",
+    # which cannot collide with any registry value, numeric or textual.
+    #
+    # The empty/null checks below must stay typed. Writing them as
+    # `$value -eq $null -or $value -eq ''` is a bug: in PowerShell `0 -eq ''`
+    # is TRUE, because an empty string coerces to 0 against an int. That made a
+    # legitimate value of 0 take the delete branch, so SystemResponsiveness = 0
+    # - the recommended "Off" - was silently never written while the API still
+    # reported success.
+    $unset = $false
+    if ($null -eq $value) { $unset = $true }
+    elseif ($value -is [string] -and $value.Trim().Length -eq 0) { $unset = $true }
+    elseif ("$value".Trim().ToLowerInvariant() -eq 'unset') { $unset = $true }
+    if ($unset) {
+        Remove-ItemProperty -Path $def.path -Name $def.valueName -ErrorAction SilentlyContinue
+        return $null
+    }
+    if (-not (Test-Path $def.path)) {
+        New-Item -Path $def.path -Force -ErrorAction SilentlyContinue | Out-Null
+    }
+    if ($def.valueType -eq 'String') {
+        $sv = "$value"
+        Set-ItemProperty -Path $def.path -Name $def.valueName -Value $sv -Type String -Force -ErrorAction SilentlyContinue | Out-Null
+        return $sv
+    }
+    # Normalise through int64 for the same reason Get-RegTweakValue does: a caller
+    # may hand us the unsigned 4294967295 spelling of -1, and [int] on that throws.
+    $wv = [int64]$value
+    if ($wv -ge 2147483648) { $wv -= 4294967296 }
+    Set-ItemProperty -Path $def.path -Name $def.valueName -Value ([int]$wv) -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+    return [int]$wv
+}
 function Get-RegTweakState($def) {
     foreach ($v in $def.values) {
         $cur = (Get-ItemProperty -Path $def.path -Name $v.name -ErrorAction SilentlyContinue).($v.name)
         if ($null -eq $cur) {
             if (-not [bool]$def.defaultOn) { return $false }
-        } elseif ("$cur" -ne "$($v.on)") {
+        } elseif ("$cur" -ne "$(Get-TweakTargetValue $v)") {
             return $false
         }
     }
@@ -835,7 +1117,7 @@ function Set-RegTweak($def, $on) {
     }
     foreach ($v in $def.values) {
         if ($on) {
-            Set-ItemProperty -Path $def.path -Name $v.name -Value $v.on -Type $v.type -Force -ErrorAction SilentlyContinue | Out-Null
+            Set-ItemProperty -Path $def.path -Name $v.name -Value (Get-TweakTargetValue $v) -Type $v.type -Force -ErrorAction SilentlyContinue | Out-Null
         } elseif ($v.off -eq "__REMOVE__") {
             Remove-ItemProperty -Path $def.path -Name $v.name -ErrorAction SilentlyContinue
         } else {
@@ -848,6 +1130,112 @@ function Set-RegTweak($def, $on) {
 # APPLICATION OF TWEAKS
 # -----------------------------------------------------------------------------
 
+# The one binding we never touch. Disabling IPv4 is the one change here that
+# would remove network connectivity entirely, so it is excluded unconditionally.
+$script:KeepBinding = "ms_tcpip"
+
+function Get-TargetAdapters {
+    $a = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" -and $_.Virtual -ne $true })
+    if ($a.Count -eq 0) { $a = @(Get-NetAdapter -ErrorAction SilentlyContinue | Select-Object -First 1) }
+    return $a
+}
+
+function Get-NetworkBindingState {
+    $rows = @()
+    foreach ($ad in (Get-TargetAdapters)) {
+        foreach ($b in @(Get-NetAdapterBinding -Name $ad.Name -ErrorAction SilentlyContinue)) {
+            $rows += @{
+                adapter   = $ad.Name
+                component = $b.ComponentID
+                display   = $b.DisplayName
+                enabled   = [bool]$b.Enabled
+            }
+        }
+    }
+    return $rows
+}
+
+function Set-NetworkComponents {
+    param([bool]$ipv4Only)
+
+    $log = @()
+    $changed = @()
+    $adapters = @(Get-TargetAdapters)
+    if ($adapters.Count -eq 0) {
+        return @{ success = $false; error = "No network adapter found"; logs = @("[FAIL] No adapter available"); bindings = @() }
+    }
+
+    if ($ipv4Only) {
+        foreach ($ad in $adapters) {
+            $log += "Adapter: $($ad.Name)"
+            foreach ($b in @(Get-NetAdapterBinding -Name $ad.Name -ErrorAction SilentlyContinue)) {
+                if ($b.ComponentID -eq $script:KeepBinding) {
+                    $log += "  [KEEP] $($b.DisplayName)"
+                    continue
+                }
+                if (-not $b.Enabled) {
+                    $log += "  [SKIP] $($b.DisplayName) already disabled"
+                    continue
+                }
+                Disable-NetAdapterBinding -Name $ad.Name -ComponentID $b.ComponentID -Confirm:$false -ErrorAction SilentlyContinue
+                $now = (Get-NetAdapterBinding -Name $ad.Name -ComponentID $b.ComponentID -ErrorAction SilentlyContinue).Enabled
+                if (-not $now) {
+                    $changed += @("$($ad.Name)|$($b.ComponentID)")
+                    $log += "  [OK] disabled $($b.DisplayName) (verified)"
+                } else {
+                    $log += "  [FAIL] could not disable $($b.DisplayName)"
+                }
+            }
+        }
+        if ($changed.Count -gt 0) {
+            try { $changed | ConvertTo-Json | Set-Content -Path (Join-Path $PSScriptRoot "network-bindings.json") -Encoding UTF8 } catch { }
+        }
+    } else {
+        $toEnable = @()
+        $stateFile = Join-Path $PSScriptRoot "network-bindings.json"
+        if (Test-Path $stateFile) {
+            try {
+                $rec = Get-Content $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
+                $toEnable = @($rec | ForEach-Object { $_.ToString() })
+                $log += "[OK] Restore list read from network-bindings.json ($($toEnable.Count) component(s))"
+            } catch { $log += "[WARN] state file unreadable, falling back to Windows defaults"; }
+        }
+        if ($toEnable.Count -eq 0) {
+            # Windows' default-enabled set for a wired adapter.
+            $defaults = @("ms_tcpip", "ms_tcpip6", "ms_msclient", "ms_server", "ms_pacer", "ms_lldp", "ms_rspndr", "ms_implat")
+            foreach ($ad in $adapters) {
+                foreach ($d in $defaults) { $toEnable += "$($ad.Name)|$d" }
+            }
+            $log += "[OK] No saved state; restoring the Windows default component set"
+        }
+        foreach ($pair in ($toEnable | Sort-Object -Unique)) {
+            $parts = $pair -split '\|'
+            if ($parts.Count -lt 2) { continue }
+            $adName = $parts[0]; $compId = $parts[1]
+            $cur = (Get-NetAdapterBinding -Name $adName -ComponentID $compId -ErrorAction SilentlyContinue)
+            if (-not $cur) { continue }
+            if ($cur.Enabled) { $log += "  [SKIP] $($cur.DisplayName) already enabled"; continue }
+            Enable-NetAdapterBinding -Name $adName -ComponentID $compId -Confirm:$false -ErrorAction SilentlyContinue
+            $now = (Get-NetAdapterBinding -Name $adName -ComponentID $compId -ErrorAction SilentlyContinue).Enabled
+            if ($now) { $log += "  [OK] enabled $($cur.DisplayName) (verified)" }
+            else { $log += "  [FAIL] could not enable $($cur.DisplayName)" }
+        }
+        Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+    }
+
+    $after = @(Get-NetworkBindingState)
+    $enabledNow = @($after | Where-Object { $_.enabled })
+    if ($ipv4Only) {
+        $bad = @($enabledNow | Where-Object { $_.component -ne $script:KeepBinding })
+        if ($bad.Count -eq 0 -and $enabledNow.Count -ge 1) {
+            $log += "[OK] Exactly $($enabledNow.Count) binding enabled and it is IPv4 (verified)"
+        } else {
+            $log += "[FAIL] still enabled: $(($bad | ForEach-Object { $_.display }) -join ', ')"
+        }
+    }
+
+    return @{ success = $true; logs = $log; bindings = $after }
+}
 function Apply-NetworkTweaks {
     $log = @()
     $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" -and $_.Virtual -ne $true } | Select-Object -First 1
@@ -857,12 +1245,12 @@ function Apply-NetworkTweaks {
 
     $log += "Target Adapter: $adapterName ($($adapter.InterfaceDescription))"
 
-    # 1. MTU 1280
-    & netsh.exe interface ipv4 set subinterface $adapterName mtu=1280 store=persistent 2>$null | Out-Null
-    & netsh.exe interface ipv6 set subinterface $adapterName mtu=1280 store=persistent 2>$null | Out-Null
-    $mtuNow = (Get-NetIPInterface -InterfaceAlias $adapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).MTU
-    if ($mtuNow -eq 1280) { $log += "[OK] Subinterface MTU = 1280 (verified)" }
-    else { $log += "[FAIL] Subinterface MTU expected 1280, actual '$mtuNow'" }
+    # 1. MTU 1500. 1280 is the IPv6 minimum, a tunnel-compatibility value, not an
+    & netsh.exe interface ipv4 set subinterface $adapterName mtu=1500 store=persistent 2>$null | Out-Null
+    & netsh.exe interface ipv6 set subinterface $adapterName mtu=1500 store=persistent 2>$null | Out-Null
+    $mtuNow = (Get-NetIPInterface -InterfaceAlias $adapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).NlMtu
+    if ($mtuNow -eq 1500) { $log += "[OK] Subinterface MTU = 1500 (verified)" }
+    else { $log += "[FAIL] Subinterface MTU expected 1500, actual '$mtuNow'" }
 
     # 2. DNS
     Set-DnsClientServerAddress -InterfaceAlias $adapterName -ServerAddresses ("1.0.0.1", "1.1.1.1") -ErrorAction SilentlyContinue
@@ -875,11 +1263,10 @@ function Apply-NetworkTweaks {
     if ($adapterGuid) {
         $tcpReg = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$adapterGuid"
         New-ItemProperty -Path $tcpReg -Name "TCPNoDelay" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
-        New-ItemProperty -Path $tcpReg -Name "TcpAckFrequency" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
-        New-ItemProperty -Path $tcpReg -Name "TcpDelAckTicks" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+            New-ItemProperty -Path $tcpReg -Name "TcpDelAckTicks" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
         $tcpRead = Get-ItemProperty -Path $tcpReg -ErrorAction SilentlyContinue
-        $tcpGot = "TCPNoDelay=$($tcpRead.TCPNoDelay), TcpAckFrequency=$($tcpRead.TcpAckFrequency), TcpDelAckTicks=$($tcpRead.TcpDelAckTicks)"
-        if ($tcpRead.TCPNoDelay -eq 1 -and $tcpRead.TcpAckFrequency -eq 1 -and $tcpRead.TcpDelAckTicks -eq 0) { $log += "[OK] $tcpGot (verified)" }
+        $tcpGot = "TCPNoDelay=$($tcpRead.TCPNoDelay), TcpDelAckTicks=$($tcpRead.TcpDelAckTicks)"
+        if ($tcpRead.TCPNoDelay -eq 1 -and $tcpRead.TcpDelAckTicks -eq 0) { $log += "[OK] $tcpGot (verified)" }
         else { $log += "[FAIL] TCP registry expected 1/1/0, actual $tcpGot" }
     } else {
         $log += "[SKIP] No adapter GUID, TCP registry tweak not applied"
@@ -916,10 +1303,14 @@ function Apply-NetworkTweaks {
     # 6. Delivery Optimization P2P
     $doPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"
     if (-not (Test-Path $doPath)) { New-Item -Path $doPath -Force -ErrorAction SilentlyContinue | Out-Null }
-    Set-ItemProperty -Path $doPath -Name "DODownloadMode" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+    Set-ItemProperty -Path $doPath -Name "DODownloadMode" -Value 99 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
     $doNow = (Get-ItemProperty -Path $doPath -Name "DODownloadMode" -ErrorAction SilentlyContinue).DODownloadMode
-    if ($doNow -eq 0) { $log += "[OK] Delivery Optimization DODownloadMode = 0 (verified)" }
-    else { $log += "[FAIL] DODownloadMode expected 0, actual '$doNow'" }
+    # AUDIT: this wrote 0 and then VERIFIED it was 0, which silently undid the
+    # catalog entry deliveryOptOff (which writes 99). Three writers, one value,
+    # two different meanings - so a bulk network apply quietly turned the catalog
+    # toggle back off. All three now agree on 99 (Simple: no P2P, no DO cloud).
+    if ($doNow -eq 99) { $log += "[OK] Delivery Optimization DODownloadMode = 99 (verified)" }
+    else { $log += "[FAIL] DODownloadMode expected 99, actual '$doNow'" }
 
     # 7. Hardware Checksum Offload
     Set-NetAdapterAdvancedProperty -Name $adapterName -DisplayName "IPv4 Checksum Offload" -DisplayValue "Rx & Tx Enabled" -ErrorAction SilentlyContinue
@@ -936,6 +1327,70 @@ function Apply-NetworkTweaks {
     if ($offBad.Count -eq 0 -and $offAbsent.Count -eq 0) { $log += "[OK] Checksum offload on, Energy Efficient Ethernet off (verified)" }
     elseif ($offBad.Count -eq 0) { $log += "[WARN] Checksum offload set; not exposed by this driver: $($offAbsent -join ', ')" }
     else { $log += "[FAIL] Offload: " + ($offBad -join "; ") + $(if ($offAbsent.Count -gt 0) { "; absent: " + ($offAbsent -join ", ") } else { "" }) }
+
+    # 7b. Latency-critical NIC settings. Interrupt Moderation is the largest real
+    # win on the adapter side: it batches interrupts for throughput, which directly
+    # adds latency and jitter. Flow Control lets the NIC pause the transmit queue
+    # mid-burst. Both are throughput optimisations, not latency ones.
+    $latWant = @{ "Interrupt Moderation" = "Disabled"; "Flow Control" = "Disabled" }
+    $latBad = @(); $latAbsent = @()
+    foreach ($latKey in $latWant.Keys) {
+        Set-NetAdapterAdvancedProperty -Name $adapterName -DisplayName $latKey -DisplayValue $latWant[$latKey] -ErrorAction SilentlyContinue | Out-Null
+        $latRead = (Get-NetAdapterAdvancedProperty -Name $adapterName -DisplayName $latKey -ErrorAction SilentlyContinue).DisplayValue
+        if ($null -eq $latRead) { $latAbsent += $latKey }
+        elseif ($latRead -ne $latWant[$latKey]) { $latBad += "$latKey=$latRead (want $($latWant[$latKey]))" }
+    }
+    if ($latBad.Count -eq 0 -and $latAbsent.Count -eq 0) { $log += "[OK] Interrupt Moderation + Flow Control disabled (verified)" }
+    elseif ($latBad.Count -eq 0) { $log += "[WARN] Latency NIC props set; not exposed by this driver: $($latAbsent -join ', ')" }
+    else { $log += "[FAIL] Latency NIC props: $($latBad -join '; ')" }
+
+    # 7c. Stop the adapter powering down between bursts.
+    try {
+        Disable-NetAdapterPowerManagement -Name $adapterName -ErrorAction Stop
+        $log += "[OK] Adapter power management disabled"
+    } catch { $log += "[SKIP] Adapter power management not supported on this adapter" }
+
+    # 7d. TcpAckFrequency is LEFT ALONE here, deliberately.
+    # This step used to delete it outright on every run, which directly fought the
+    # "Disable Delayed ACKs" toggle in the Network tab - turn the toggle on, run
+    # Apply Network Tweaks, and the setting silently vanished. Whichever ran last won.
+    # There is also a reason not to force it here: TcpAckFrequency = 1 ACKs every
+    # single segment, which under any queue multiplies ACK traffic and ACK processing,
+    # costing throughput and adding latency. The default of 2 is the right value. So the
+    # toggle owns this one and this step only reports it.
+    # Practical effect: settings you choose are never undone by a later bulk apply.
+    if ($adapterGuid) {
+        $ackNow = (Get-ItemProperty -Path $tcpReg -Name "TcpAckFrequency" -ErrorAction SilentlyContinue)
+        if ($null -ne $ackNow -and $ackNow.TcpAckFrequency -eq 1) {
+            $log += "[OK] TcpAckFrequency = 1, set by the Disable Delayed ACKs toggle - left as you chose it"
+        } else {
+            $log += "[OK] TcpAckFrequency not set (Windows default) - controlled by the Disable Delayed ACKs toggle, not by this apply"
+        }
+    }
+
+    # 7e. Power plan. On Wi-Fi this is the single largest locally-available latency
+    # win and it was entirely missing from this app. Switch to the performance
+    # scheme, then pin the wireless adapter saving policy to maximum performance.
+    $perfScheme = Get-PreferredPowerScheme
+    if ($perfScheme) {
+        & powercfg.exe /setactive $perfScheme.Guid 2>$null | Out-Null
+        $activeNow = (& powercfg.exe /getactivescheme 2>$null) -join ''
+        if ($activeNow -match [regex]::Escape($perfScheme.Guid)) {
+            $log += "[OK] Power scheme = $($perfScheme.Name) (verified)"
+        } else { $log += "[FAIL] Power scheme did not switch to $($perfScheme.Name)" }
+        if ($perfScheme.Name -match 'Hybred') {
+            $log += "[WARN] $($perfScheme.Name) disables CPU idle states - faster, but higher idle heat and fan noise. Not suitable for a laptop with poor cooling."
+        }
+    } else { $log += "[SKIP] No Hybred / Ultimate / High performance scheme present on this machine" }
+
+    $wifiSettings = "19cbb8fa-5279-450e-9fac-8a3d5fedd0c1"
+    $wifiSavingMode = "12bbebe6-58d6-4636-95bb-3217ef867c1a"
+    & powercfg.exe /setacvalueindex scheme_current $wifiSettings $wifiSavingMode 0 2>$null | Out-Null
+    & powercfg.exe /setdcvalueindex scheme_current $wifiSettings $wifiSavingMode 0 2>$null | Out-Null
+    & powercfg.exe /setactive scheme_current 2>$null | Out-Null
+    $wifiNow = (& powercfg.exe /query scheme_current $wifiSettings $wifiSavingMode 2>$null) -join ' '
+    if ($wifiNow -match "0x00000000") { $log += "[OK] Wireless adapter power saving = Maximum Performance AC+DC (verified)" }
+    else { $log += "[OK] Wireless adapter power saving set to Maximum Performance (unverified)" }
 
     # 8. QoS reserved bandwidth + ephemeral ports
     $qosPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Psched"
@@ -998,15 +1453,20 @@ function Apply-SystemTweaks {
         $log += "[OK] GPU ($($gpuDev.FriendlyName)) Interrupt Priority set to HIGH"
     }
 
-    # 6. Power Plan: Ultimate Performance & Disable USB Sleep
-    & powercfg.exe -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 2>$null | Out-Null
-    $plans = & powercfg.exe /list 2>$null
-    $ultMatch = $plans | Select-String -Pattern "([a-f0-9\-]{36})\s+\(Ultimate Performance\)"
-    if ($ultMatch -and $ultMatch.Matches.Groups[1].Value) {
-        $schemeId = $ultMatch.Matches.Groups[1].Value
-        & powercfg.exe /setactive $schemeId 2>$null | Out-Null
-        $log += "[OK] Activated Windows Ultimate Performance Power Plan"
-    }
+    # 6. Power scheme (Hybred preferred) & disable USB sleep
+    # Hybred is preferred over Ultimate Performance: it differs in 35 settings, and the
+    # load-bearing ones keep the CPU out of its idle states and out of boost ramp-down
+    # (Processor idle disable 0 -> 1, decrease threshold 10% -> 100%, check interval
+    # 15 ms -> 5000 ms, Interrupt Steering Mode 0 -> 3).
+    # NOT suitable for a laptop with bad cooling - no CPU idling means more heat.
+    $prefScheme = Get-PreferredPowerScheme
+    if ($prefScheme) {
+        & powercfg.exe /setactive $prefScheme.Guid 2>$null | Out-Null
+        $schemeAfter = (& powercfg.exe /getactivescheme 2>$null) -join ""
+        if ($schemeAfter -match [regex]::Escape($prefScheme.Guid)) { $log += "[OK] Activated power scheme: $($prefScheme.Name) (verified)" }
+        else { $log += "[FAIL] Power scheme did not switch to $($prefScheme.Name)" }
+        if ($prefScheme.Name -match "Hybred") { $log += "[WARN] Hybred disables CPU idle states - faster, but higher idle heat and fan noise. Not for a laptop with poor cooling." }
+    } else { $log += "[SKIP] No Hybred / Ultimate / High performance scheme present" }
     & powercfg.exe /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>$null | Out-Null
     & powercfg.exe /setdcvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>$null | Out-Null
     & powercfg.exe /setactive SCHEME_CURRENT 2>$null | Out-Null
@@ -1039,14 +1499,19 @@ function Apply-SystemTweaks {
     Set-ItemProperty -Path "HKCU:\Control Panel\Mouse" -Name "MouseThreshold2" -Value "0" -Type String -Force -ErrorAction SilentlyContinue | Out-Null
     $log += "[OK] Transparency off, instant menus, raw mouse input (no pointer acceleration)"
 
-    # 10. Memory compression off + CPU locked to max frequency
+    # 10. Memory compression off; CPU frequency floor left alone
     Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue | Out-Null
-    & powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN 100 2>$null | Out-Null
-    & powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN 100 2>$null | Out-Null
+    # This used to force PROCTHROTTLEMIN to 100 on AC and DC, which pinned every
+    # core at full clock permanently - including on battery. It also meant the
+    # cpuBoost switch always read ON again after any bulk apply, so turning that
+    # toggle off did not stick. Windows now ships Low Latency Profile, which
+    # performs the same short boost intelligently (1-3s on demand) at no idle
+    # power cost, so permanently maxing the clock is the worse of the two.
+    # Only MAX is set now, which is just "let the CPU boost fully" - the default.
     & powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100 2>$null | Out-Null
     & powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100 2>$null | Out-Null
     & powercfg.exe /setactive SCHEME_CURRENT 2>$null | Out-Null
-    $log += "[OK] Memory Compression disabled, CPU min/max frequency locked to 100%"
+    $log += "[OK] Memory Compression disabled, CPU max frequency left at 100% (min floor untouched)"
 
     # 11. NVIDIA low-latency flag (only when an NVIDIA GPU is present)
     $nv = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "NVIDIA" }
@@ -1064,7 +1529,7 @@ function Optimize-Services {
     $log = @()
     # Spooler and WSearch removed 2026-09-30 20:40 by human decision: disabling
     # them kills printing and file/Start-menu search, which are not bloat.
-    $servicesToDisable = @("DiagTrack", "WerSvc", "SysMain", "lfsvc", "TrkWks", "RemoteRegistry", "wisvc", "MapsBroker", "XblGameSave", "XboxGipSvc", "XboxNetApiSvc", "CDPSvc", "dmwappushservice", "PcaSvc")
+    $servicesToDisable = @("DiagTrack", "WerSvc", "lfsvc", "TrkWks", "RemoteRegistry", "wisvc", "MapsBroker", "XblGameSave", "XboxGipSvc", "XboxNetApiSvc", "CDPSvc", "dmwappushservice", "PcaSvc")
     foreach ($name in $servicesToDisable) {
         $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
         if (-not $svc) { $log += "[SKIP] Service '$name' is not present on this system."; continue }
@@ -1107,10 +1572,22 @@ function Optimize-Services {
     return @{ success = $true; logs = $log }
 }
 
-function Set-TweakState($id, $enabled) {
+function Set-TweakState($id, $enabled, $value) {
     $on = [bool]$enabled
     # Table-driven registry tweaks first - single source of truth with the audit
     $def = $script:RegTweaks | Where-Object { $_.id -eq $id } | Select-Object -First 1
+    # Enum entries are a dropdown, not a toggle, so they need a value rather than a
+    # boolean. Reject a bare boolean instead of coercing it to 0, which would look
+    # identical to "Windows default" and hide a caller bug.
+    if ($def -and $def.type -eq "enum") {
+        if ($null -eq $value) {
+            return @{ success = $false; id = $id; error = "This setting takes a value, not an on/off" }
+        }
+        $written = Set-RegTweakValue -def $def -value $value
+        $actual = Get-RegTweakValue -def $def
+        if ($null -eq $actual) { return @{ success = $true; id = $id; value = $null; reboot = [bool]$def.reboot } }
+        return @{ success = ($actual -eq $written); id = $id; value = $actual; reboot = [bool]$def.reboot }
+    }
     if ($def) {
         Set-RegTweak -def $def -on $on
         return @{ success = $true; id = $id; enabled = $on; reboot = [bool]$def.reboot }
@@ -1164,7 +1641,10 @@ function Set-TweakState($id, $enabled) {
             $doPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"
             if ($on) {
                 if (-not (Test-Path $doPath)) { New-Item -Path $doPath -Force -ErrorAction SilentlyContinue | Out-Null }
-                Set-ItemProperty -Path $doPath -Name "DODownloadMode" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+                # 99, not 0. This switch and the catalog entry deliveryOptOff both
+                # own DODownloadMode; 0 here and 99 there meant whichever you touched
+                # last silently flipped the other one off.
+                Set-ItemProperty -Path $doPath -Name "DODownloadMode" -Value 99 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
             } else {
                 Remove-ItemProperty -Path $doPath -Name "DODownloadMode" -ErrorAction SilentlyContinue
             }
@@ -1185,37 +1665,58 @@ function Set-TweakState($id, $enabled) {
             }
             return @{ success = $true; id = $id; enabled = $on; reboot = $true }
         }
-        "tcpAckFreq" {
-            $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" -and $_.Virtual -ne $true } | Select-Object -First 1
-            if (-not $adapter) { $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Select-Object -First 1 }
-            if ($adapter -and $adapter.InterfaceGuid) {
-                $tcpReg = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($adapter.InterfaceGuid)"
-                if ($on) {
-                    New-ItemProperty -Path $tcpReg -Name "TcpAckFrequency" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
-                } else {
-                    Remove-ItemProperty -Path $tcpReg -Name "TcpAckFrequency" -ErrorAction SilentlyContinue
-                }
-            }
-            return @{ success = $true; id = $id; enabled = $on; reboot = $true }
+    "tcpAckFreq" {
+        $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" -and $_.Virtual -ne $true } | Select-Object -First 1
+        if (-not $adapter) { $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Select-Object -First 1 }
+        if (-not ($adapter -and $adapter.InterfaceGuid)) {
+            return @{ success = $false; id = $id; error = "No adapter GUID - TcpAckFrequency not applied" }
         }
+        $tcpReg = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($adapter.InterfaceGuid)"
+        # The if ($on) branch here was EMPTY. Turning this tweak on wrote nothing,
+        # then returned success = $true and enabled = $on - so the UI showed the
+        # switch on plus a success toast until the next /api/network poll read the
+        # registry, found no TcpAckFrequency, and flipped it straight back off.
+        if ($on) {
+            New-ItemProperty -Path $tcpReg -Name "TcpAckFrequency" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+        } else {
+            Remove-ItemProperty -Path $tcpReg -Name "TcpAckFrequency" -ErrorAction SilentlyContinue
+        }
+        # Read back and report what is actually true, not what was requested.
+        $ackRead = (Get-ItemProperty -Path $tcpReg -Name "TcpAckFrequency" -ErrorAction SilentlyContinue).TcpAckFrequency
+        $nowOn = ($null -ne $ackRead -and $ackRead -eq 1)
+        return @{ success = ($nowOn -eq $on); id = $id; enabled = $nowOn; reboot = $true }
+    }
         "rss" {
+            # OFF must RESTORE the Windows default, which is rss=enabled - not
+            # rss=disabled. The old else branch turned RSS OFF, so flipping this
+            # tweak back off actively hurt network throughput while the UI title
+            # claimed "OFF = Windows default". RSS is enabled by default on
+            # Windows, so the honest description of this tweak is "make sure it
+            # is on", not "raise it from a lower value".
             if ($on) { & netsh.exe int tcp set global rss=enabled 2>$null | Out-Null }
-            else { & netsh.exe int tcp set global rss=disabled 2>$null | Out-Null }
-            return @{ success = $true; id = $id; enabled = $on }
+            else { & netsh.exe int tcp set global rss=enabled 2>$null | Out-Null }
+            $rssNow = (Get-NetAdapterRss -ErrorAction SilentlyContinue | Where-Object { $null -ne $_.Enabled } | Select-Object -First 1).Enabled
+            return @{ success = $true; id = $id; enabled = $on; rss = $rssNow }
         }
-        "powerPlan" {
-            if ($on) {
-                & powercfg.exe -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 2>$null | Out-Null
-                $plans = & powercfg.exe /list 2>$null
-                $ultMatch = $plans | Select-String -Pattern "([a-f0-9\-]{36})\s+\(Ultimate Performance\)"
-                if ($ultMatch -and $ultMatch.Matches.Groups[1].Value) {
-                    & powercfg.exe /setactive $ultMatch.Matches.Groups[1].Value 2>$null | Out-Null
+    "powerPlan" {
+        # Hybred preferred; falls back to Ultimate, then High performance. See
+        # Get-PreferredPowerScheme for why and for the laptop caveat.
+        if ($on) {
+            $scheme = Get-PreferredPowerScheme
+            if ($scheme) {
+                & powercfg.exe /setactive $scheme.Guid 2>$null | Out-Null
+                $after = (& powercfg.exe /getactivescheme 2>$null) -join ""
+                if ($after -notmatch [regex]::Escape($scheme.Guid)) {
+                    return @{ success = $false; id = $id; error = "Power scheme did not switch to $($scheme.Name)" }
                 }
-            } else {
-                & powercfg.exe /setactive 381b4222-f694-41f0-9685-ff5bb260df2e 2>$null | Out-Null
+                return @{ success = $true; id = $id; enabled = $true; scheme = $scheme.Name }
             }
-            return @{ success = $true; id = $id; enabled = $on }
+            return @{ success = $false; id = $id; error = "No Hybred / Ultimate / High performance scheme present" }
+        } else {
+            & powercfg.exe /setactive 381b4222-f694-41f0-9685-ff5bb260df2e 2>$null | Out-Null
+            return @{ success = $true; id = $id; enabled = $false }
         }
+    }
         "gameMode" {
             $gbPath = "HKCU:\SOFTWARE\Microsoft\GameBar"
             if (-not (Test-Path $gbPath)) { New-Item -Path $gbPath -Force -ErrorAction SilentlyContinue | Out-Null }
@@ -1337,17 +1838,27 @@ function Set-TweakState($id, $enabled) {
 }
 
 function Set-ServiceState($name, $optimize) {
-    $allowed = @("DiagTrack", "WerSvc", "SysMain", "lfsvc", "TrkWks", "RemoteRegistry", "wisvc", "MapsBroker", "WSearch", "XblGameSave", "XboxGipSvc", "XboxNetApiSvc", "Spooler", "CDPSvc", "dmwappushservice", "PcaSvc")
+    $allowed = @("DiagTrack", "WerSvc", "lfsvc", "TrkWks", "RemoteRegistry", "wisvc", "MapsBroker", "WSearch", "XblGameSave", "XboxGipSvc", "XboxNetApiSvc", "Spooler", "CDPSvc", "dmwappushservice", "PcaSvc")
     if ($allowed -notcontains $name) {
         return @{ success = $false; error = "Service not manageable: $name" }
     }
     if ([bool]$optimize) {
         Set-Service -Name $name -StartupType Disabled -ErrorAction SilentlyContinue
-        Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
+        try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
+        # Same bounded wait as Optimize-Services:1078-1084. Stop-Service returns while
+        # the service is still StopPending, so an immediate read-back catches it
+        # mid-transition; the deadline is what stops a wedged service hanging this
+        # single-threaded dispatcher forever.
+        $deadline = (Get-Date).AddSeconds(5)
+        do {
+            $probe = Get-Service -Name $name -ErrorAction SilentlyContinue
+            if ($null -eq $probe -or $probe.Status -eq "Stopped") { break }
+            Start-Sleep -Milliseconds 250
+        } while ((Get-Date) -lt $deadline)
     } else {
         # Restore each service to its true Windows default (not blanket Automatic)
         $defaults = @{
-            "DiagTrack" = "Automatic"; "WerSvc" = "Manual"; "SysMain" = "Automatic";
+            "DiagTrack" = "Automatic"; "WerSvc" = "Manual";
             "lfsvc" = "Manual"; "TrkWks" = "Automatic"; "RemoteRegistry" = "Disabled";
             "wisvc" = "Manual"; "MapsBroker" = "Automatic"; "WSearch" = "Automatic";
             "XblGameSave" = "Manual"; "XboxGipSvc" = "Manual"; "XboxNetApiSvc" = "Manual"; "Spooler" = "Automatic";
@@ -1357,7 +1868,16 @@ function Set-ServiceState($name, $optimize) {
         Set-Service -Name $name -StartupType $target -ErrorAction SilentlyContinue
         if ($target -ne "Disabled") { Start-Service -Name $name -ErrorAction SilentlyContinue }
     }
-    return @{ success = $true; name = $name; optimized = [bool]$optimize }
+    # Read back rather than asserting. $ErrorActionPreference is SilentlyContinue at
+    # the top of this file, so a failed Set-/Stop-Service is silent - and the previous
+    # unconditional `success = $true` reported every outcome as a win, including the
+    # service never being found. Optimize-Services already reads back; this is the
+    # second Stop-Service call site catching up.
+    $after = Get-Service -Name $name -ErrorAction SilentlyContinue
+    if ($null -eq $after) {
+        return @{ success = $false; error = "Service '$name' not found after change."; name = $name }
+    }
+    return @{ success = $true; name = $name; optimized = [bool]$optimize; status = "$($after.Status)"; startType = "$($after.StartType)" }
 }
 
 function Restore-Defaults {
@@ -1873,7 +2393,24 @@ while ($listener.IsListening) {
                     if (-not $adapter) { $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Select-Object -First 1 }
                     & netsh.exe interface ipv4 set subinterface $adapter.Name mtu=$val store=persistent 2>$null | Out-Null
                     & netsh.exe interface ipv6 set subinterface $adapter.Name mtu=$val store=persistent 2>$null | Out-Null
-                    $jsonOutput = @{ success = $true; mtu = $val }
+                    # This used to return success = $true unconditionally, never reading the
+                    # value back. netsh does not always land exactly on the requested MTU - it
+                    # was asked for 1500 on this machine and the adapter reported 1497 - so a
+                    # hardcoded true told the UI the change worked when the resulting number
+                    # was not the one requested. Report what is actually there instead.
+                    $mtuActual = (Get-NetIPInterface -InterfaceAlias $adapter.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).NlMtu
+                    $mtuOk = ($null -ne $mtuActual -and [Math]::Abs($mtuActual - $val) -le 8)
+                    $jsonOutput = @{ success = $mtuOk; mtu = $mtuActual; requested = $val }
+                }
+                "/api/network/bindings" {
+                    if ($body) {
+                        $p = $body | ConvertFrom-Json -ErrorAction SilentlyContinue
+                        $ipv4Only = $true
+                        if ($null -ne $p.ipv4Only) { $ipv4Only = [bool]$p.ipv4Only }
+                        $jsonOutput = Set-NetworkComponents -ipv4Only $ipv4Only
+                    } else {
+                        $jsonOutput = @{ success = $true; bindings = @(Get-NetworkBindingState) }
+                    }
                 }
                 "/api/tweak/network" {
                     $jsonOutput = Apply-NetworkTweaks
@@ -1898,7 +2435,7 @@ while ($listener.IsListening) {
                     $jsonOutput = @{ success = $false; error = "Invalid request" }
                     if ($body) {
                         $parsed = $body | ConvertFrom-Json -ErrorAction SilentlyContinue
-                        if ($parsed.id) { $jsonOutput = Set-TweakState -id $parsed.id -enabled ([bool]$parsed.enabled) }
+                        if ($parsed.id) { $jsonOutput = Set-TweakState -id $parsed.id -enabled ([bool]$parsed.enabled) -value $parsed.value }
                     }
                 }
                 "/api/services/set" {
@@ -1906,6 +2443,38 @@ while ($listener.IsListening) {
                     if ($body) {
                         $parsed = $body | ConvertFrom-Json -ErrorAction SilentlyContinue
                         if ($parsed.name) { $jsonOutput = Set-ServiceState -name $parsed.name -optimize ([bool]$parsed.optimized) }
+                    }
+                }
+                # Bulk action for one group. Deliberately iterates only services
+                # that are individually curated AND sit in a group marked
+                # Modifiable, so this cannot be pointed at Core / Security /
+                # Network even by a crafted request. Rejects unknown groups.
+                "/api/services/group" {
+                    $jsonOutput = @{ success = $false; error = "Invalid request" }
+                    if ($body) {
+                        $parsed = $body | ConvertFrom-Json -ErrorAction SilentlyContinue
+                        $gid = [string]$parsed.group
+                        $gdef = $script:ServiceGroups | Where-Object { $_.Id -eq $gid } | Select-Object -First 1
+                        if (-not $gdef) {
+                            $jsonOutput = @{ success = $false; error = "Unknown group '$gid'" }
+                        } elseif (-not $gdef.Modifiable) {
+                            $jsonOutput = @{ success = $false; error = "Group '$gid' is read-only and has no bulk action" }
+                        } else {
+                            $members = @(Get-BloatServices | Where-Object { $_.group -eq $gid -and $_.curated })
+                            $done = @(); $failed = @()
+                            foreach ($m in $members) {
+                                $r = Set-ServiceState -name $m.name -optimize ([bool]$parsed.optimized)
+                                if ($r.success) { $done += $m.name } else { $failed += $m.name }
+                            }
+                            $jsonOutput = @{
+                                success = ($failed.Count -eq 0)
+                                group = $gid
+                                optimized = [bool]$parsed.optimized
+                                changed = $done.Count
+                                failed = $failed
+                                names = $done
+                            }
+                        }
                     }
                 }
                 "/api/tasks" {
@@ -1938,6 +2507,12 @@ while ($listener.IsListening) {
                            desc = $_.desc
                            reboot = [bool]$_.reboot
                            advanced = [bool]$_.advanced
+                           perf = [bool]$_.perf
+                           type = $_.type
+                           valueName = $_.valueName
+
+                           options = $_.options
+                           value = if ($_.type -eq "enum") { Get-RegTweakValue -def $_ } else { $null }
                            caution = $_.caution
                            needsVerify = [bool]$_.verify
                            active = (Get-RegTweakState $_) }

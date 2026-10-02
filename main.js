@@ -406,9 +406,29 @@ app.whenReady().then(() => {
             shown = true;
             sendProgress(100, 'Ready.');
             setTimeout(() => {
-                try { if (splashWindow && !splashWindow.isDestroyed()) splashWindow.close(); } catch (_) {}
-                if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
-                initAutoUpdate();
+                // Dissolve the splash rather than closing it outright. The splash
+                // window scales itself down and fades, and the main window is
+                // raised underneath one frame later, so the hand-off reads as one
+                // continuous reveal instead of a cut from black to a full UI.
+                // The close is still guaranteed after the fade, so a renderer
+                // that never runs splashDissolve cannot trap the user here.
+                const finish = () => {
+                    try { if (splashWindow && !splashWindow.isDestroyed()) splashWindow.close(); } catch (_) {}
+                    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+                    initAutoUpdate();
+                };
+                let dissolved = false;
+                try {
+                    if (splashWindow && !splashWindow.isDestroyed()) {
+                        splashWindow.webContents.executeJavaScript('window.splashDissolve && window.splashDissolve()')
+                            .then(() => { dissolved = true; })
+                            .catch(() => {});
+                    }
+                } catch (_) {}
+                // 460ms covers the 0.42s CSS transition in splash.html; the extra
+                // guard means we still close if the promise never settles.
+                setTimeout(finish, 460);
+                void dissolved;
             }, 350);
         };
 

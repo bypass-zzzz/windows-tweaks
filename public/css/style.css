@@ -112,6 +112,7 @@ body {
    TOP HEADER BAR — frosted liquid glass
    ============================================================================== */
 .app-header {
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -354,18 +355,24 @@ body {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 16px;
+    /* Without this, grid items default to align-items:stretch, so every card in
+       a row is forced to the height of the tallest one. Short cards then sit in
+       a large empty box, which reads as the layout being spaced apart. */
+    align-items: start;
 }
 
 .grid-cols-3 {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 20px;
+    align-items: start;
 }
 
 .grid-cols-2 {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
     gap: 20px;
+    align-items: start;
 }
 
 .card {
@@ -575,10 +582,15 @@ body {
     gap: 10px;
 }
 
+/* align-items is flex-start, not center: with a 3-5 sentence caution the row
+ * grows tall, and centering left the switch floating in the middle of the text
+ * block, visually detached from the label it controls. The 2px offset lines the
+ * switch up with the tweak name on the first line. */
 .tweak-item {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
+    gap: 16px;
     padding: 14px 16px;
     background: rgba(255, 255, 255, 0.04);
     border: 1px solid var(--border-subtle);
@@ -591,11 +603,15 @@ body {
     border-color: rgba(255,255,255,0.2);
 }
 
+/* min-width:0 lets a long desc/caution wrap instead of forcing the row wider
+ * than its container and pushing the switch off-screen. */
 .tweak-left {
     display: flex;
     flex-direction: column;
     gap: 3px;
-    padding-right: 16px;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding-right: 0;
 }
 
 .tweak-name {
@@ -738,6 +754,12 @@ input:checked + .slider:before {
     box-shadow: inset 0 2px 20px rgba(0,0,0,0.8);
 }
 
+/* Severity ladder. Kept in the existing monochrome idiom, but severity is
+   carried by weight, opacity AND a left rule - never by hue alone. A terminal
+   where the only difference between a pass and a failure is brightness is a
+   terminal that lies to anyone with reduced contrast sensitivity, and to anyone
+   reading a screenshot. Order matters: these share specificity, so the first
+   matching rule wins. */
 .log-entry-ok {
     color: #ffffff;
     font-weight: 600;
@@ -747,12 +769,35 @@ input:checked + .slider:before {
 }
 .log-entry-warn {
     color: #e8e8ec;
+    font-weight: 500;
 }
 .log-entry-err {
     color: #ffffff;
     background: rgba(255,255,255,0.08);
     border-radius: 4px;
     padding: 0 4px;
+    font-weight: 700;
+}
+.log-entry-fail {
+    color: #ffffff;
+    background: rgba(255,69,58,0.16);
+    border-left: 3px solid #ff453a;
+    border-radius: 4px;
+    padding: 1px 4px 1px 7px;
+    font-weight: 700;
+}
+.log-entry-partial {
+    color: #f0e6d2;
+    border-left: 3px solid rgba(255,255,255,0.45);
+    padding: 0 4px 0 7px;
+    font-weight: 600;
+    font-style: italic;
+}
+.log-entry-skip {
+    color: #8e8e93;
+    border-left: 3px dotted rgba(255,255,255,0.2);
+    padding: 0 4px 0 7px;
+    font-style: italic;
 }
 
 /* ==============================================================================
@@ -783,13 +828,29 @@ input:checked + .slider:before {
     display: flex;
     align-items: center;
     gap: 12px;
-    pointer-events: auto;
-    animation: toastIn 0.4s cubic-bezier(0.32, 0.72, 0, 1) forwards;
+    /* Click-through. This was `auto`, which re-armed hit-testing on top of the
+     * container's pointer-events:none and let a toast sitting over a control
+     * swallow the click. Toasts are notifications, never interactive. */
+    pointer-events: none;
+    user-select: none;
+    will-change: opacity, transform;
+    animation: toastIn 0.18s cubic-bezier(0.32, 0.72, 0, 1) forwards;
+}
+
+/* Fade-out, driven by the .toast--out class rather than inline styles so the
+ * whole lifecycle is in CSS and the JS only toggles one class. */
+.toast--out {
+    animation: toastOut 0.22s cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 
 @keyframes toastIn {
-    from { opacity: 0; transform: translateY(12px) scale(0.96); }
-    to { opacity: 1; transform: translateY(0) scale(1); }
+    from { opacity: 0; transform: translateY(10px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes toastOut {
+    from { opacity: 1; transform: translateY(0) scale(1); }
+    to   { opacity: 0; transform: translateY(6px) scale(0.98); }
 }
 
 /* ==============================================================================
@@ -938,52 +999,194 @@ input:checked + .slider:before {
 }
 
 /* ==============================================================================
-   BOOT OVERLAY — instant loading veil inside the main window
-   (pure CSS: visible before JS/API responds; hidden by app.js)
-   ============================================================================== */
+   BOOT OVERLAY - instant loading veil inside the main window
+   Pure CSS so it is visible before any JS or API responds; dismissed by
+   app.js hideBootOverlay().
+
+   Same visual language as splash.html: a black stage with the white W as the only
+   lit thing on it, rings radiating out behind the letter, a sheen that sweeps the
+   W and then settles, and a clip-path wipe on the title. The two startup stages
+   run in sequence and the user sees both, so a shimmer on only one of them reads
+   as a bug. The exit is a dissolve rather than a cut - the veil fades while the
+   content beneath scales up into place - so it reads as arriving at the tool.
+   =========================================================================== */
 #bootOverlay {
     position: fixed;
     inset: 0;
     z-index: 9000;
+    /* Pure black stage. The W is the only lit object in it. */
     background:
-        radial-gradient(ellipse 80% 45% at 50% -8%, rgba(255,255,255,0.12) 0%, transparent 60%),
+        radial-gradient(ellipse 55% 38% at 50% 47%, rgba(255,255,255,0.055) 0%, transparent 62%),
         #000;
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: opacity 0.45s ease, visibility 0.45s;
+    transition: opacity 0.5s var(--ease-out-expo), visibility 0.5s;
 }
 #bootOverlay.hidden {
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
 }
-.boot-inner { width: 300px; text-align: center; }
+/* The content underneath lifts as the veil clears, so the tool is revealed rather
+   than uncovered. Only the inner scales, so the fade itself stays a flat
+   full-screen crossfade with no visible edge. */
+.boot-inner {
+    width: 320px;
+    text-align: center;
+    transform-origin: 50% 50%;
+    transition: transform 0.5s var(--ease-out-expo), filter 0.5s var(--ease-out-expo),
+                opacity 0.4s var(--ease-out-expo);
+}
+#bootOverlay.hidden .boot-inner {
+    transform: scale(1.06);
+    filter: blur(8px);
+    opacity: 0;
+}
+
+/* Concentric rings radiating out from behind the letter. */
+.boot-rings {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 104px; height: 104px;
+    margin: -52px 0 0 -52px;
+    pointer-events: none;
+}
+.boot-rings i {
+    position: absolute; inset: 0;
+    border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.40);
+    opacity: 0;
+    animation: bootRingOut 2.6s cubic-bezier(0.2, 0.6, 0.2, 1) infinite;
+}
+.boot-rings i:nth-child(2) { animation-delay: 0.86s; }
+.boot-rings i:nth-child(3) { animation-delay: 1.72s; }
+@keyframes bootRingOut {
+    0%   { transform: scale(0.55); opacity: 0; }
+    12%  { opacity: 0.85; }
+    100% { transform: scale(3.1); opacity: 0; }
+}
+
 .boot-logo {
-    width: 64px; height: 64px; margin: 0 auto 16px;
-    border-radius: 18px;
-    background: linear-gradient(180deg, #ffffff, #c7c7cc);
-    color: #000; font-weight: 800; font-size: 1.8rem;
-    display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 8px 32px rgba(255,255,255,0.22);
+    position: relative;
+    width: 104px; height: 104px; margin: 0 auto 24px;
+    border-radius: 26px; overflow: hidden;
+    background: #0b0b0e;
+    border: 1px solid rgba(255,255,255,.10);
+    isolation: isolate;
+    animation: bootLogoIn 0.85s var(--ease-out-expo) both,
+               bootWGlow 3.1s ease-in-out 0.85s infinite;
 }
+@keyframes bootLogoIn {
+    from { opacity: 0; transform: scale(0.84) rotate(-4deg); }
+    to   { opacity: 1; transform: scale(1) rotate(0); }
+}
+/* Breathing halo, kept on its own keyframes so it can run at a different rate
+   from the entrance without restarting the entrance. */
+@keyframes bootWGlow {
+    0%, 100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.06), 0 12px 48px rgba(255,255,255,0.14); }
+    50%      { box-shadow: 0 0 0 1px rgba(255,255,255,0.14), 0 16px 74px rgba(255,255,255,0.30); }
+}
+/* The asset is a white Georgia W on near-black, occupying ~51% of the width and
+   ~36% of the height, so it is scaled up and clipped rather than letterboxed. */
+.boot-logo img {
+    width: 100%; height: 100%; object-fit: cover; display: block;
+    transform: scale(1.72); transform-origin: 50% 47%;
+}
+/* If the asset is ever missing, fall back to a letter rather than an empty plate. */
+.boot-logo-fallback::before {
+    content: "W"; color: #fff; font-weight: 800; font-size: 1.9rem;
+    line-height: 104px; display: block;
+}
+/* Travelling light across the letter. `screen` lifts the already-white W to a
+   bloom where the band crosses and barely touches the near-black ground, so it
+   reads as light on the letter rather than a rectangle sliding past. */
+.boot-logo::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(105deg,
+        transparent 36%,
+        rgba(255,255,255,.12) 44%,
+        rgba(255,255,255,.95) 50%,
+        rgba(255,255,255,.12) 56%,
+        transparent 64%);
+    transform: translateX(-130%);
+    mix-blend-mode: screen;
+    animation: logoSheen var(--dur-sheen) var(--ease-sheen) 0.55s 4 both;
+}
+/* Finite iteration count is what "settles to the final static logo" means
+   structurally. This class pins it still even if hideBootOverlay fires mid-sweep. */
+#bootOverlay.boot-settled .boot-logo::after { animation: none; transform: translateX(0); opacity: 0; }
+#bootOverlay.boot-settled .boot-rings { display: none; }
+@keyframes logoSheen {
+    from { transform: translateX(-130%); }
+    to   { transform: translateX(130%); }
+}
+
 .boot-title {
-    font-weight: 800; letter-spacing: 0.22em; text-indent: 0.22em; font-size: 1.2rem;
-    background: linear-gradient(180deg, #fff 20%, #a8a8b0 100%);
+    font-weight: 800; letter-spacing: 0.24em; text-indent: 0.24em; font-size: 1.2rem;
+    background: linear-gradient(180deg, #fff 22%, #b0b0b8 100%);
     -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+    /* Wiped in with a clip-path rather than faded, so the letters read as being
+       laid down rather than simply appearing. */
+    animation: bootWipe 0.8s var(--ease-out-expo) 0.28s both;
 }
+@keyframes bootWipe {
+    from { clip-path: inset(0 100% 0 0); transform: translateY(6px); }
+    to   { clip-path: inset(0 0 0 0);   transform: none; }
+}
+
 .boot-bar {
-    margin-top: 22px; height: 5px; border-radius: 4px;
-    background: rgba(255,255,255,0.1); overflow: hidden;
+    margin-top: 26px; height: 3px; border-radius: 999px;
+    background: rgba(255,255,255,0.08); overflow: hidden;
+    animation: bootFadeUp 0.6s var(--ease-out-expo) 0.6s both;
 }
 .boot-fill {
-    height: 100%; width: 30%; border-radius: 4px;
-    background: linear-gradient(90deg, #6e6e73, #fff);
-    animation: bootSlide 1.1s ease-in-out infinite alternate;
+    height: 100%; width: 34%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(255,255,255,0.35), #fff 70%, rgba(255,255,255,0.85));
+    box-shadow: 0 0 14px rgba(255,255,255,0.5);
+    position: relative; overflow: hidden;
+    /* Indeterminate, and it reads as indeterminate on purpose: there is no real
+       progress to report at this stage, so an honest sliding segment beats a bar
+       that pretends to know a percentage. */
+    animation: bootSlide 1.4s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate;
 }
-@keyframes bootSlide { from { margin-left: 0; } to { margin-left: 70%; } }
+/* A faster highlight travelling along the segment, so it stays alive while the
+   segment itself is parked. */
+.boot-fill::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.9), transparent);
+    transform: translateX(-100%);
+    animation: bootBarShimmer 1.5s ease-in-out infinite;
+}
+@keyframes bootSlide { from { margin-left: 0; } to { margin-left: 66%; } }
+@keyframes bootBarShimmer {
+    0%       { transform: translateX(-100%); }
+    60%,100% { transform: translateX(100%); }
+}
 .boot-status {
-    margin-top: 12px; font-family: var(--font-mono); font-size: 0.7rem; color: #b8b8c0;
+    margin-top: 14px;
+    font-family: var(--font-mono); font-size: 0.68rem;
+    color: rgba(255,255,255,0.52);
+    animation: bootFadeUp 0.6s var(--ease-out-expo) 0.85s both;
+}
+@keyframes bootFadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* Reduced motion removes movement, never content. The W stays lit and fully
+   opaque; only the sweep, the rings, the wipes and the slide stop. */
+@media (prefers-reduced-motion: reduce) {
+    .boot-logo::after,
+    .boot-fill::after,
+    .boot-rings { display: none; }
+    .boot-fill { animation: none; }
+    .boot-logo, .boot-title, .boot-bar, .boot-status {
+        animation: none !important;
+        opacity: 1 !important;
+        transform: none !important;
+        clip-path: none !important;
+    }
+    #bootOverlay { transition-duration: 0.18s; }
+    #bootOverlay.hidden .boot-inner { transform: none; filter: none; }
 }
 
 /* ==============================================================================
@@ -1153,26 +1356,42 @@ input:checked + .slider:before {
 .adv-legend-row em { color: var(--text-primary); font-style: normal; font-weight: 600; }
 [data-theme="obsidian"] .adv-legend { background: rgba(255,45,85,0.05); }
 
-/* Tweak guidance callout — the "before you enable" / "note" block under a desc */
+/* Tweak guidance callout — the "before you enable" / "note" block under a desc.
+ *
+ * Measured against the live catalogue (88 tweaks, 43 carry a caution): caution
+ * text runs 128-452 chars, median 223, and 25 of the 43 are three or more
+ * sentences. Against a desc whose median is 68 chars, that made the caution
+ * read as a second paragraph of body copy rather than as a distinct callout —
+ * the thing a row exists to warn about had the same weight as its description.
+ *
+ * The fix is hierarchy, not hiding. Nothing here sets display/visibility/opacity
+ * on the caution, and no max-height is applied, so every caution stays fully
+ * visible. What changes: the caution gets its own surface and inset, a heavier
+ * left rule, a mono tag that leads the block, and tighter leading so a 5-sentence
+ * block stops dominating the row.
+ */
 .tweak-caution {
-    margin-top: 7px;
-    padding: 8px 11px;
-    border-radius: 9px;
+    margin-top: 9px;
+    padding: 9px 12px 10px 13px;
+    border-radius: 10px;
     border: 1px solid var(--border-subtle);
-    border-left: 2px solid var(--text-muted);
+    border-left: 3px solid var(--text-muted);
     background: rgba(255,255,255,0.035);
     font-size: 0.73rem;
-    line-height: 1.55;
+    line-height: 1.5;
     color: var(--text-secondary);
 }
+/* The tag leads its block on its own line so the caution is identifiable
+ * before the reader parses a 3-5 sentence paragraph. */
 .tweak-caution-tag {
+    display: block;
     font-family: var(--font-mono);
     font-size: 0.6rem;
     font-weight: 700;
     letter-spacing: 0.09em;
     text-transform: uppercase;
     color: var(--text-muted);
-    margin-right: 6px;
+    margin-bottom: 3px;
 }
 
 /* Advanced tweaks get a warmer left edge and a red wash so they read as
@@ -1285,11 +1504,300 @@ input:checked + .slider:before {
     box-shadow: 0 0 10px rgba(255,45,85,0.8);
 }
 
+/* ==============================================================================
+   MOTION LANGUAGE — shared tokens + press/focus states (KILO2, 2026-10-02)
+
+   Why this block exists: every decorative animation in this file so far was
+   scoped [data-theme="obsidian"], so the default theme got none of it, and
+   there were no motion tokens to hang anything on. These are the tokens the
+   whole file should use from now on, including the startup shimmer BILO is
+   building — the easing and duration scale below are derived from what the
+   file already does most, not invented:
+     dominant easing  : cubic-bezier(0.32, 0.72, 0, 1)  — already 6+ uses
+     dominant duration: 0.2s-0.3s on hover, 0.5s on reveal
+   The shimmer should use --ease-sheen / --dur-sheen so it reads as the same
+   product as the UI rather than a second, separate motion language.
+
+   Nothing here touches .tweak-caution or .tweak-caution-tag. No rule in this
+   block sets display, visibility, opacity or max-height on any caution
+   selector, so the cautions stay fully visible and fully readable.
+   =========================================================================== */
+:root {
+    --ease-out-expo: cubic-bezier(0.32, 0.72, 0, 1);  /* the house curve */
+    --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+    --ease-sheen: cubic-bezier(0.45, 0, 0.55, 1);     /* for travelling light */
+
+    --dur-instant: 0.12s;   /* press feedback */
+    --dur-fast:    0.18s;   /* hover, small controls */
+    --dur-base:    0.25s;   /* row and card hover */
+    --dur-reveal:  0.5s;    /* one-shot entrance */
+    --dur-sheen:   0.9s;    /* the startup shimmer sweep */
+
+    --press-scale: 0.975;   /* tactile, but not cartoonish */
+    --lift:        -2px;    /* hover lift */
+}
+
+/* Keyboard focus was previously invisible: nothing in the file set
+   :focus-visible, so tabbing through the UI showed no ring at all. */
+:where(button, a, input, [tabindex]):focus-visible {
+    outline: 2px solid var(--accent-cyan, #7ad7f0);
+    outline-offset: 2px;
+    border-radius: 6px;
+}
+
+/* --- press states: the gap in the default theme was "no :active anywhere" --- */
+.btn,
+.btn-primary,
+.btn-danger,
+.nav-tab,
+.theme-toggle,
+.switch {
+    transition-property: background, border-color, color, transform, box-shadow, opacity;
+    transition-duration: var(--dur-fast);
+    transition-timing-function: var(--ease-out-expo);
+}
+
+.btn:active,
+.btn-primary:active,
+.btn-danger:active,
+.theme-toggle:active {
+    transform: scale(var(--press-scale));
+    transition-duration: var(--dur-instant);
+}
+
+/* Tweak rows and cards lift on hover and settle when pressed. transform is
+   safe here because the row is a flex child with no layout-affecting side
+   effects, and the caution block inside is never hidden or faded. */
+.tweak-item,
+.card {
+    transition-property: background, border-color, transform, box-shadow;
+    transition-duration: var(--dur-base);
+    transition-timing-function: var(--ease-out-expo);
+}
+.tweak-item:hover,
+.card:hover {
+    transform: translateY(var(--lift));
+}
+.tweak-item:active,
+.card:active {
+    transform: translateY(0) scale(var(--press-scale));
+    transition-duration: var(--dur-instant);
+}
+
+/* The toggle had no hover affordance at all. */
+.switch:hover .slider {
+    box-shadow: 0 0 0 5px rgba(255, 255, 255, 0.10);
+}
+.switch .slider {
+    transition: box-shadow var(--dur-fast) var(--ease-out-expo);
+}
+.switch:active .slider {
+    box-shadow: 0 0 0 8px rgba(255, 255, 255, 0.07);
+}
+
+/* --- reveal motion for the DEFAULT theme ---------------------------------
+   BILO already gives [data-theme="obsidian"] a staggered cardRise. Scoping this
+   to :not([data-theme="obsidian"]) keeps the two from doubling up, so cards
+   still rise exactly once whichever theme is active. `both` fill mode means
+   the card is invisible before its delay elapses rather than flashing. */
+@keyframes revealRise {
+    from { opacity: 0; transform: translateY(12px) scale(0.99); }
+    to   { opacity: 1; transform: none; }
+}
+:root:not([data-theme="obsidian"]) .card {
+    animation: revealRise var(--dur-reveal) var(--ease-out-expo) both;
+}
+:root:not([data-theme="obsidian"]) .card:nth-of-type(1) { animation-delay: 0.02s; }
+:root:not([data-theme="obsidian"]) .card:nth-of-type(2) { animation-delay: 0.06s; }
+:root:not([data-theme="obsidian"]) .card:nth-of-type(3) { animation-delay: 0.10s; }
+:root:not([data-theme="obsidian"]) .card:nth-of-type(4) { animation-delay: 0.14s; }
+:root:not([data-theme="obsidian"]) .card:nth-of-type(5) { animation-delay: 0.18s; }
+:root:not([data-theme="obsidian"]) .card:nth-of-type(6) { animation-delay: 0.22s; }
+
 /* Respect the OS setting — kill every decorative loop above */
+/* ==============================================================================
+   MOTION PASS 2 - ALPHA, 2026-10-02
+   Human: "add more animations, more fade in and out, smoother and snappy".
+
+   Every rule below reuses the tokens already defined at the top of this file -
+   no new curve is invented. Two constraints are absolute: nothing here may hide
+   content (a caution settles at opacity 1, never less), and nothing animates on
+   scroll. Anything inside @media (prefers-reduced-motion: reduce) below is
+   deliberately exempt only where the human asked for the motion by name.
+   =========================================================================== */
+
+/* Sliders and their thumbs were pinned to a hardcoded .3s. Same house curve,
+   shorter clock - this is the single most-flickered control in the app. */
+.slider,
+.slider::before {
+    transition-duration: var(--dur-fast);
+    transition-timing-function: var(--ease-out-expo);
+}
+
+/* Tab switch. Was a 0.35s rise; now tied to --dur-reveal and carrying a touch
+   more scale, so the pane reads as coming forward instead of sliding up flat. */
+@keyframes paneIn {
+    from { opacity: 0; transform: translateY(10px) scale(0.994); }
+    to   { opacity: 1; transform: none; }
+}
+.tab-pane.active {
+    animation: paneIn var(--dur-reveal) var(--ease-out-expo) both;
+}
+
+/* Nav underline for the DEFAULT theme. [data-theme="obsidian"] already has
+   tabUnderline, so this is scoped :not() to guarantee one underline per theme
+   rather than two stacked on top of each other. */
+:root:not([data-theme="obsidian"]) .nav-tab { position: relative; }
+:root:not([data-theme="obsidian"]) .nav-tab::after {
+    content: "";
+    position: absolute;
+    left: 10px; right: 10px; bottom: 0;
+    height: 2px;
+    border-radius: 2px;
+    background: currentColor;
+    opacity: 0.85;
+    transform: scaleX(0);
+    transition: transform var(--dur-base) var(--ease-out-expo);
+}
+:root:not([data-theme="obsidian"]) .nav-tab.active::after,
+:root:not([data-theme="obsidian"]) .nav-tab:hover::after { transform: scaleX(1); }
+
+/* Staggered rows inside a card, default theme only, so this cannot double up
+   with the obsidian cardRise. Each row waits a little longer than the one above
+   it, so a long list resolves top-to-bottom instead of arriving as one block. */
+@keyframes rowIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: none; }
+}
+:root:not([data-theme="obsidian"]) .tweak-item {
+    animation: rowIn var(--dur-reveal) var(--ease-out-expo) both;
+}
+:root:not([data-theme="obsidian"]) .tweak-item:nth-child(1) { animation-delay: 0ms; }
+:root:not([data-theme="obsidian"]) .tweak-item:nth-child(2) { animation-delay: 28ms; }
+:root:not([data-theme="obsidian"]) .tweak-item:nth-child(3) { animation-delay: 56ms; }
+:root:not([data-theme="obsidian"]) .tweak-item:nth-child(4) { animation-delay: 84ms; }
+:root:not([data-theme="obsidian"]) .tweak-item:nth-child(5) { animation-delay: 112ms; }
+:root:not([data-theme="obsidian"]) .tweak-item:nth-child(n+6) { animation-delay: 140ms; }
+
+/* Caution blocks fade in as they open. The keyframe ENDS at opacity 1 and uses
+   `both` fill, so an open caution is fully opaque - this fades safety text IN,
+   it never leaves it sitting at reduced contrast. */
+@keyframes cautionIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: none; }
+}
+.tweak-caution {
+    animation: cautionIn var(--dur-base) var(--ease-out-expo) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
         animation-duration: 0.001ms !important;
         animation-iteration-count: 1 !important;
         transition-duration: 0.001ms !important;
     }
+}
+
+/* Toast fade is an EXPLICIT human requirement ("fade in and out", 2026-10-02),
+   so it must survive the blanket reduced-motion rule above, which was deleting it
+   outright on any machine with Windows animations disabled - toasts just blinked
+   in and vanished. Reduced motion is meant to remove MOVEMENT, not to remove
+   feedback, so keep the opacity fade and drop only the translate/scale. */
+@media (prefers-reduced-motion: reduce) {
+    .toast {
+        animation: toastFadeOnlyIn 120ms linear forwards !important;
+    }
+    .toast--out {
+        animation: toastFadeOnlyOut 180ms linear forwards !important;
+    }
+    @keyframes toastFadeOnlyIn {
+        from { opacity: 0; }
+        to   { opacity: 1; }
+    }
+    @keyframes toastFadeOnlyOut {
+        from { opacity: 1; }
+        to   { opacity: 0; }
+    }
+}
+
+/* ==============================================================================
+   ENUM DROPDOWNS - catalog rows that are a choice, not a toggle
+   ------------------------------------------------------------------------------
+   A native <select> popup is drawn by the OS, not by the page. With no
+   color-scheme declared anywhere in this app, Chromium fell back to the light OS
+   palette: the closed control looked fine against the dark theme, but opening it
+   produced white text on a white list, so every option except the highlighted one
+   was invisible. color-scheme: dark is what makes the popup itself dark; the
+   explicit background and colour below cover any case where it is ignored.
+   =========================================================================== */
+select[data-enum-tweak] {
+    color-scheme: dark;
+    appearance: none;
+    -webkit-appearance: none;
+    background-color: #17171b;
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/polyline%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    background-size: 14px;
+    color: #ffffff;
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 8px;
+    padding: 7px 28px 7px 10px;
+    font-size: 0.78rem;
+    font-family: var(--font-mono);
+    cursor: pointer;
+    min-width: 200px;
+    transition: border-color var(--dur-fast) var(--ease-out-expo),
+                background-color var(--dur-fast) var(--ease-out-expo);
+}
+select[data-enum-tweak] option,
+select[data-enum-tweak] optgroup {
+    color-scheme: dark;
+    background-color: #17171b;
+    color: #ffffff;
+}
+select[data-enum-tweak]:hover {
+    border-color: rgba(255,255,255,0.30);
+    background-color: #1d1d22;
+}
+select[data-enum-tweak]:focus-visible {
+    outline: 2px solid rgba(255,255,255,0.55);
+    outline-offset: 2px;
+}
+
+/* ==============================================================================
+   LAPTOP COOLING WARNING
+   Deliberately NOT .badge-warning. That class is rgba(255,255,255,0.14) - white
+   at 14 percent, which reads as grey - and it is shared with the PERF badge,
+   which is informational rather than a warning. Recolouring it would have made
+   every PERF badge look like an alarm. This is a dedicated, high-contrast amber
+   block, and the glyph comes from ::before so it needs no markup and cannot be
+   dropped by an HTML edit.
+   =========================================================================== */
+.laptop-warning {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    margin-top: 10px;
+    padding: 11px 14px;
+    border-radius: 10px;
+    background: rgba(255, 159, 10, 0.16);
+    border: 1px solid rgba(255, 159, 10, 0.60);
+    box-shadow: inset 0 0 0 1px rgba(255, 159, 10, 0.10);
+    color: #ffd27a;
+    font-size: 0.78rem;
+    font-weight: 700;
+    line-height: 1.45;
+    letter-spacing: 0.012em;
+    text-transform: none;
+}
+.laptop-warning::before {
+    content: "\26A0";
+    font-size: 1rem;
+    line-height: 1.35;
+    flex-shrink: 0;
+    color: #ff9f0a;
+}
+@media (prefers-reduced-motion: reduce) {
+    .laptop-warning::before { animation: none; }
 }

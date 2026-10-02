@@ -58,6 +58,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     fetchProcesses();
     startPingStream();
 
+    // The tweak catalog was never fetched here. renderCatalog() reads
+    // cachedCatalogList, which stayed an empty array until something else
+    // happened to call fetchCatalog() - so on a cold start BOTH catalog tabs
+    // rendered from the rows hardcoded in index.html instead of the server's
+    // 88 entries. Must come after initApiBase() so API_BASE is resolved.
+    fetchCatalog();
+
     // Periodic Polling (fast + smooth)
     statusInterval = setInterval(fetchSystemStatus, 2000);
 });
@@ -142,6 +149,11 @@ function hideBootOverlay() {
     bootHidden = true;
     const el = document.getElementById("bootOverlay");
     if (el) {
+        // Settle the logo shimmer to its final static state before the fade, so the
+        // sweep is never still moving behind the fade-out. The animation already
+        // has a finite iteration count, but that only bounds it in time - this
+        // makes the end state explicit rather than dependent on when we get here.
+        el.classList.add("boot-settled");
         el.classList.add("hidden");
         setTimeout(() => el.remove(), 600);
     }
@@ -193,6 +205,7 @@ function initTabs() {
                     catalogFilter = "cat:Network";
                     catalogHostId = "networkGroups";
                     renderCatalog();
+                    loadBindings();
                 }
                 if (targetId === "tab-processes") {
                 fetchProcesses();
@@ -212,11 +225,45 @@ function initTabs() {
 // -----------------------------------------------------------------------------
 // TOAST NOTIFICATIONS
 // -----------------------------------------------------------------------------
+// Human requirements (2026-10-02): each toast lives at most ONE SECOND, fades in
+// and out, is click-through, and must not pile up when many toggles fire at once.
+//
+// Measured before this change: appendChild was unbounded, the dwell was 3800ms,
+// the fade was scheduled at 300ms, and .toast set pointer-events:auto which
+// re-armed hit-testing on top of the container's pointer-events:none - that last
+// one is why a toast could sit over a control and swallow the click.
+//
+// The cap is the fix for stacking, not a debounce. Debouncing would drop toasts
+// the user asked for; capping keeps the newest MAX_TOASTS and lets the overflow
+// age out on its own timer. A duplicate guard collapses an identical repeat
+// within a short window, so toggling one tweak ten times yields one toast.
+const TOAST_MAX_MS = 1000;   // hard ceiling on total lifetime, per the human
+const TOAST_FADE_MS = 220;   // fade-out, inside that 1000ms budget
+const TOAST_MAX_VISIBLE = 3; // never more than this on screen
+const TOAST_DEDUPE_MS = 700; // same message inside this window refreshes, not duplicates
+
+const TOAST_STATE = { nodes: [], recent: new Map() };
+
 function showToast(message, type = "info") {
     const container = document.getElementById("toastContainer");
+    if (!container) return;
+    const text = String(message);
+
+    // Collapse an identical repeat inside the dedupe window.
+    const lastSeen = TOAST_STATE.recent.get(text);
+    const now = Date.now();
+    if (lastSeen !== undefined && now - lastSeen < TOAST_DEDUPE_MS) return;
+    TOAST_STATE.recent.set(text, now);
+    if (TOAST_STATE.recent.size > 40) {
+        // Keep the map from growing without bound over a long session.
+        for (const [k, t] of TOAST_STATE.recent) {
+            if (now - t > TOAST_DEDUPE_MS * 4) TOAST_STATE.recent.delete(k);
+        }
+    }
+
     const toast = document.createElement("div");
     toast.className = "toast";
-    
+
     // Icon colours come from CSS custom properties so they follow the active
     // theme; the inline fallbacks only apply if the vars are missing.
     const infoC = "var(--accent-cyan, #ffffff)";
@@ -229,27 +276,84 @@ function showToast(message, type = "info") {
     if (type === "error") icon = `<span class="pulse-dot" style="color:${errC};"></span>`;
     if (type === "warn") icon = `<span class="pulse-dot" style="color:${warnC};"></span>`;
 
-    toast.innerHTML = `${icon} <span>${message}</span>`;
+    toast.innerHTML = `${icon} <span></span>`;
+    // textContent, not innerHTML for the message: it is interpolated from tweak
+    // ids and labels, and this is the one place a stray < or & would become
+    // markup. The icon above is our own literal, so it stays in innerHTML.
+    toast.lastElementChild.textContent = text;
     container.appendChild(toast);
+    TOAST_STATE.nodes.push(toast);
 
+    // Fade out inside the budget, then remove. Total lifetime is
+    // TOAST_MAX_MS; the fade runs in the last TOAST_FADE_MS of it.
     setTimeout(() => {
-        toast.style.opacity = "0";
-        toast.style.transform = "translateY(8px)";
-        toast.style.transition = "all 0.3s ease";
-        setTimeout(() => toast.remove(), 300);
-    }, 3800);
+        toast.classList.add("toast--out");
+        setTimeout(() => {
+            toast.remove();
+            const i = TOAST_STATE.nodes.indexOf(toast);
+            if (i !== -1) TOAST_STATE.nodes.splice(i, 1);
+        }, TOAST_FADE_MS);
+    }, Math.max(0, TOAST_MAX_MS - TOAST_FADE_MS));
+
+    // Hard ceiling on how many can be visible at once. Oldest goes first.
+    while (TOAST_STATE.nodes.length > TOAST_MAX_VISIBLE) {
+        const oldest = TOAST_STATE.nodes[0];
+        TOAST_STATE.nodes.shift();
+        oldest.classList.add("toast--out");
+        setTimeout(() => oldest.remove(), TOAST_FADE_MS);
+    }
 }
 
 // -----------------------------------------------------------------------------
 // LOG TERMINAL
 // -----------------------------------------------------------------------------
+// Severity table for the bracketed status tokens server.ps1 emits. The list was
+// derived by counting tokens in server.ps1, not by guessing: [OK] x25, [FAIL]
+// x12, [PARTIAL] x2, [SKIP] x2, [WARN] x2. [ERR] is emitted by the frontend.
+//
+// The old chain of `if (text.includes(...))` statements only knew [OK], [WARN]
+// and [ERR], so [FAIL], [PARTIAL] and [SKIP] fell through to log-entry-info -
+// dim grey, the least prominent style in the terminal. A failed read-back was
+// rendered as less important than a passing one.
+//
+// It also had a second bug the same test caught: the chain was last-wins, not
+// worst-wins, so a line reading "[OK] applied [FAIL] one value" rendered green.
+// Severity is now resolved by rank, so the worst token on the line decides.
+const LOG_SEVERITY = [
+    { token: "[ERR]", rank: 6, cls: "log-entry-err" },
+    { token: "[FAIL]", rank: 5, cls: "log-entry-fail" },
+    { token: "[PARTIAL]", rank: 4, cls: "log-entry-partial" },
+    { token: "[WARN]", rank: 3, cls: "log-entry-warn" },
+    { token: "[SKIP]", rank: 2, cls: "log-entry-skip" },
+    { token: "[OK]", rank: 1, cls: "log-entry-ok" },
+];
+
+// Callers that pass an explicit type with no token in the text (cache-flush
+// notes, fetch failures) still get the class they always did.
+const LOG_TYPE_CLASS = {
+    ok: "log-entry-ok",
+    warn: "log-entry-warn",
+    err: "log-entry-err",
+    info: "log-entry-info",
+};
+
+function classifyLogLine(text, type) {
+    let best = null;
+    for (const entry of LOG_SEVERITY) {
+        if (text.includes(entry.token) && (!best || entry.rank > best.rank)) {
+            best = entry;
+        }
+    }
+    // A token in the text is stronger evidence than the caller's default type,
+    // but an explicit non-default type still wins when the text has no token.
+    if (best) return best.cls;
+    return LOG_TYPE_CLASS[type] || "log-entry-info";
+}
+
 function appendLog(text, type = "info") {
     const term = document.getElementById("terminalLog");
     const time = new Date().toLocaleTimeString();
-    let prefixClass = "log-entry-info";
-    if (type === "ok" || text.includes("[OK]")) prefixClass = "log-entry-ok";
-    if (type === "warn" || text.includes("[WARN]")) prefixClass = "log-entry-warn";
-    if (type === "err" || text.includes("[ERR]")) prefixClass = "log-entry-err";
+    const prefixClass = classifyLogLine(text, type);
 
     const line = document.createElement("div");
     line.className = prefixClass;
@@ -351,7 +455,10 @@ let cachedCatalogList = [];
 let cachedStartupApps = [];
 
 function escapeHtml(str) {
-    if (!str) return "";
+// `if (!str) return ""` treated 0 as falsy, so any numeric zero rendered as an
+// empty string. That silently produced <option value=""> for the many catalog
+// values that are legitimately 0, and the select could never be set to them.
+if (str === null || str === undefined) return "";
     return String(str)
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
@@ -394,6 +501,77 @@ function tweakState(id) {
 }
 
 // Sync every static switch (network/system tabs) to the real probed state
+// A row is either a boolean toggle or, when the server marks it type="enum", a
+// dropdown. The server sends the current value plus an options list, so nothing
+// here is hardcoded.
+//
+// The "Windows default" sentinel is the STRING "unset", not a number. It used to
+// be -1, which is wrong: GPUPriority and Taskscheduler use the signed SFIO scale
+// where negative is the elevated end (-2 Critical, -1 High, 0 Normal, 1 Low,
+// 2 Idle). Treating -1 as "unset" made High unreachable - selecting it deleted
+// the value - and the dropdown then had to label 2 as "High", which Windows reads
+// as Idle. Values are therefore compared as STRINGS throughout, and 0 is kept
+// distinct: SystemResponsiveness = 0 is the recommended "Off".
+const UNSET = "unset";
+function enumControlHtml(t) {
+    const cur = (t.value === null || t.value === undefined) ? UNSET : String(t.value);
+    const opts = (t.options || []).map(o =>
+        `<option value="${escapeHtml(o.v)}"${String(o.v) === cur ? " selected" : ""}>${escapeHtml(o.l)}</option>`
+    ).join("");
+
+    return `<div style="display:flex; flex-direction:column; align-items:flex-end; gap:5px; flex-shrink:0;">
+        <select data-enum-tweak="${escapeHtml(t.id)}" title="Choose a value">${opts}</select>
+            </div>`;
+}
+
+async function setEnumTweak(id, value) {
+    const entry = (cachedCatalogList || []).find(t => t.id === id);
+    const name = entry ? entry.label : id;
+    const chosen = entry ? ((entry.options || []).find(o => String(o.v) === String(value)) || {}).l : value;
+    const isDefault = String(value) === UNSET;
+    showToast(`${name} -> ${chosen}`, "info");
+    appendLog(`[TWEAK] ${name} = ${chosen}${isDefault ? " (removes the value, Windows default)" : ""}...`);
+    // MMCSS has textual values too - "Scheduling Category" is literally the
+    // string High/Medium/Low. Number("High") is NaN, so anything non-numeric has
+    // to be sent as text. The "unset" sentinel must survive as a string too:
+    // JSON.stringify turns NaN into null, and a null also means "delete", which
+    // would hide the very distinction the sentinel exists to make.
+    const numeric = Number(value);
+    const payloadValue = (!isNaN(numeric) && String(value).trim() !== "") ? numeric : String(value);
+    try {
+        const res = await fetch(`${API_BASE}/api/tweak/set`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id, value: payloadValue })
+        });
+        const data = await res.json();
+        if (data.success) {
+            appendLog(`[OK] ${name} set to ${chosen}.${data.reboot ? " Reboot recommended." : ""}`);
+            showToast(`${name}: ${chosen}`, "success");
+        } else {
+            appendLog(`[ERR] ${name} failed: ${data.error || "unknown error"}`, "err");
+            showToast(data.error || `${name} failed`, "error");
+        }
+    } catch (e) {
+        appendLog(`[ERR] ${name} failed: ${e.message}`, "err");
+        showToast(`${name} failed`, "error");
+        fetchCatalog();
+    }
+    // On success, do NOT refetch. fetchCatalog() re-renders the whole tab by
+    // replacing host.innerHTML, which destroys and rebuilds every row - that is
+    // what made the screen flicker, and what made the select appear to snap back
+    // to its previous value mid-change. The server already returned the value it
+    // actually wrote, so reconcile against that instead: patch the cached entry
+    // and the control's own value. Only a failure refetches, because that is the
+    // one case where the server contradicts what is on screen.
+    if (data && data.success) {
+        const applied = (data.value === null || data.value === undefined) ? UNSET : String(data.value);
+        const cached = (cachedCatalogList || []).find(t => t.id === id);
+        if (cached) cached.value = applied;
+        const sel = document.querySelector(`select[data-enum-tweak="${id}"]`);
+        if (sel) sel.value = String(applied);
+    }
+}
 function syncSwitches() {
     document.querySelectorAll('input[data-tweak]').forEach(el => {
         // Skip quick-audit rows — renderQuickAudit sets those directly
@@ -452,6 +630,75 @@ async function setTweak(id, enabled) {
 let catalogFilter = "performance";
 let catalogHostId = "advGroups";
 
+// Is this tweak's feature backed by a cloud service?
+//
+// The badge used to be keyed on `c === "AI Features"`, i.e. on the tweak's
+// CATEGORY, which is the wrong axis twice over. It was false for members of that
+// same category - aiStudioEffects runs on the local NPU, aiBingSearch forces the
+// local index (its desc says "No query ever leaves the machine"), and
+// aiDataAnalysis is on-device - and it missed genuinely cloud-backed features
+// filed elsewhere, e.g. copilotPolicy under Gaming and oneDriveSync under Updates.
+//
+// Keyed on tweak id, so this needs no server.ps1 change and stays out of the
+// dispatcher and the RegTweaks zones.
+//
+// A first attempt derived this by keyword-matching desc/caution prose. It was run
+// against the real 88-entry catalog and rejected, because matching prose cannot
+// tell "this needs a cloud service" from "this stops needing one":
+//   - copilotPolicy: desc is "Turns off the Copilot assistant and its background
+//     hooks." No cloud wording anywhere, yet unambiguously cloud-backed.
+//   - aiBingSearch: desc says results "stop waiting on a web round-trip", so a
+//     naive /web/ match flags the one tweak whose entire point is that no query
+//     ever leaves the machine.
+// A curated list is auditable and cannot invert like that. Each entry carries its
+// own reason, so a reviewer can check the claim instead of trusting a regex.
+// An entry mapped to null is a deliberate, documented non-cloud decision.
+const CLOUD_BACKED = {
+    copilotPolicy:       "Copilot is a cloud service with no offline mode",
+    bingSearch:          "Bing answers in the Start box are fetched from Microsoft",
+    aiBingSearch:        "Bing answers in the Start box are fetched from Microsoft",
+    aiSearchWeb:         "web results in search are fetched from Microsoft",
+    aiCopilotApp:        "Copilot is a cloud service with no offline mode",
+    aiCopilotTips:       "Copilot prompts are served by the Copilot service",
+    aiCortana:           "Cortana's answer and voice pipeline is server-side",
+    aiOfficeCopilot:     "Copilot in Microsoft 365 runs server-side",
+    aiTeamsChat:         "Teams chat payloads are downloaded from Microsoft",
+    aiEdgeFeatures:      "Copilot sidebar and page summary are server-side",
+    oneDriveSync:        "your files are stored on Microsoft's servers",
+    activityFeed:        "activity history is uploaded to your Microsoft account",
+    adId:                "advertising ID is resolved by Microsoft's ad services",
+    tailoredExp:         "tailored experiences are computed from uploaded diagnostics",
+    allowTelemetry:      "diagnostic data is uploaded to Microsoft",
+    diagLogs:            "extended diagnostic logs are gathered and sent to Microsoft",
+    inputPersonalization: "typed words and clipboard history are sent to Microsoft",
+    ipv6Tunnels:         "Teredo/ISATAP/6to4 relay IPv6 through public relays",
+    nssiProbeOff:        "Windows polls a Microsoft endpoint to decide online status",
+    dohOff:              "DNS over HTTPS resolves names through a cloud resolver",
+    // Deliberately NOT cloud-backed, mapped to null so the decision is visible
+    // rather than an omission. These are the ones the old category-wide badge got
+    // wrong, so they are the ones most likely to be "corrected" back by mistake:
+    aiDataAnalysis:      null, // on-device analysis pipeline
+    aiClickToDo:         null, // its own caution says on-device models
+    aiStudioEffects:     null, // runs on the local NPU
+};
+
+// Excluded with reasons, so a later reader does not read the gap as an oversight:
+//   deliveryOptOff   P2P payload exchange between PCs, not a Microsoft cloud service
+//   remoteAssist     inbound only - nothing leaves this machine
+//   consumerFeatures, lockAds, searchHighlights   ad content, no service dependency
+//   contentDelivery  ad/telemetry toggles already covered by the entries above
+
+function cloudReason(t) {
+    if (!t || !t.id) return null;
+    return Object.prototype.hasOwnProperty.call(CLOUD_BACKED, t.id)
+        ? CLOUD_BACKED[t.id]
+        : null;
+}
+
+function isCloudDependent(t) {
+    return cloudReason(t) !== null;
+}
+
 function renderCatalog() {
     const q = ((document.getElementById("advSearch") || {}).value || "").trim().toLowerCase();
     const countId = catalogHostId === "gamingGroups" ? "gamingCount"
@@ -471,12 +718,15 @@ function renderCatalog() {
     const NETWORK_TAB_CATEGORIES = ["Network"];
     let list;
     if (catalogFilter === "performance") {
-        list = all.filter(t => t.advanced === true);
+        list = all.filter(t => t.perf === true);
     } else if (catalogFilter.startsWith("cat:")) {
         const want = catalogFilter.slice(4);
         list = all.filter(t => t.category === want);
     } else {
-        list = all.filter(t => !NETWORK_TAB_CATEGORIES.includes(t.category));
+        // General Tweaks = everything EXCEPT the Network tab and EXCEPT the
+        // audited performance set, which has its own tab. Excluding only Network
+        // left the 10 performance tweaks rendering in both tabs at once.
+        list = all.filter(t => !NETWORK_TAB_CATEGORIES.includes(t.category) && t.perf !== true);
     }
     if (!list || list.length === 0) {
         host.innerHTML = `<div style="color:var(--text-muted); font-size:0.8rem; padding:16px;">Loading catalog…</div>`;
@@ -539,21 +789,25 @@ function renderCatalog() {
                 <div style="font-size:0.78rem;">Try searching for a different keyword like "dns", "game", "telemetry", or "mouse".</div>
             </div>`;
     } else {
+        // Counted once per category rather than three times inline in the template.
+        const cloudCountFor = c => groups[c].reduce(
+            (n, t) => n + (isCloudDependent(t) ? 1 : 0), 0);
+
         const groupsHtml = renderOrder.map(c => `
             <div class="adv-group">
-                <div class="adv-group-title">${escapeHtml(c)} <span class="adv-group-n">${groups[c].length}</span>${c === "AI Features" ? ' <span class="badge badge-neutral" title="Windows features that use AI or send data to a cloud model">cloud-dependent</span>' : ''}</div>
+                <div class="adv-group-title">${escapeHtml(c)} <span class="adv-group-n">${groups[c].length}</span>${cloudCountFor(c) ? ` <span class="badge badge-neutral" title="${cloudCountFor(c)} of these ${groups[c].length} run against a cloud service">${cloudCountFor(c)} cloud-backed</span>` : ''}</div>
                 <div class="tweak-list">
                 ${groups[c].map(t => `
                     <div class="tweak-item${t.advanced ? ' is-advanced' : ''}">
                         <div class="tweak-left">
-                            <div class="tweak-name">${escapeHtml(t.label)}${t.advanced ? ' <span class="badge badge-warning" title="Real performance effect - read the guidance, some trade security or battery">PERF</span>' : ''}${t.reboot ? ' <span class="badge badge-neutral" title="Needs reboot">↻</span>' : ''}${t.needsVerify ? ' <span class="badge badge-danger" title="Registry value not independently verified on this machine">unverified</span>' : ''}</div>
+                            <div class="tweak-name">${escapeHtml(t.label)}${t.advanced ? ' <span class="badge badge-warning" title="Real performance effect - read the guidance, some trade security or battery">PERF</span>' : ''}${isCloudDependent(t) ? ` <span class="badge badge-neutral" title="${escapeHtml(cloudReason(t))}">cloud</span>` : ''}${t.reboot ? ' <span class="badge badge-neutral" title="Needs reboot">↻</span>' : ''}${t.needsVerify ? ' <span class="badge badge-danger" title="Registry value not independently verified">unverified</span>' : ''}</div>
                             <div class="tweak-desc">${escapeHtml(t.desc)}</div>
                             ${t.caution ? `<div class="tweak-caution"><span class="tweak-caution-tag">${t.advanced ? 'Before you enable' : 'Note'}</span> ${escapeHtml(t.caution)}</div>` : ''}
                         </div>
-                        <label class="switch" title="ON = optimized, OFF = Windows default">
+                        ${t.type === "enum" ? enumControlHtml(t) : `<label class="switch" title="ON = optimized, OFF = Windows default">
                             <input type="checkbox" data-tweak="${escapeHtml(t.id)}" ${t.active ? 'checked' : ''}>
                             <span class="slider"></span>
-                        </label>
+                        </label>`}
                     </div>`).join("")}
                 </div>
             </div>`).join("");
@@ -569,10 +823,10 @@ function renderCatalog() {
                             <div class="tweak-name">${escapeHtml(t.label)} <span class="badge badge-danger">no category</span></div>
                             <div class="tweak-desc">${escapeHtml(t.desc || "")}</div>
                         </div>
-                        <label class="switch" title="ON = optimized, OFF = Windows default">
+                        ${t.type === "enum" ? enumControlHtml(t) : `<label class="switch" title="ON = optimized, OFF = Windows default">
                             <input type="checkbox" data-tweak="${escapeHtml(t.id)}" ${t.active ? 'checked' : ''}>
                             <span class="slider"></span>
-                        </label>
+                        </label>`}
                     </div>`).join("")}
                 </div>
             </div>` : "";
@@ -593,8 +847,14 @@ async function fetchCatalog() {
     }
 }
 
+// The services table column is headed "Off" and the switch reads
+// "ON = disabled (optimized), OFF = running". So the user turning the switch ON is
+// turning the service OFF. The toast used to answer that action with
+// "Disabling <name>" — the same action in the opposite voice, which is what the
+// human reported as "the card says disable X and the toast says enabling X".
+// Speak the same language as the control instead.
 async function setService(name, optimize) {
-    showToast(`${optimize ? 'Disabling' : 'Restoring'} ${name}...`, "info");
+    showToast(`Turning ${optimize ? 'off' : 'on'} ${name}...`, "info");
     try {
         const res = await fetch(`${API_BASE}/api/services/set`, {
             method: "POST",
@@ -604,7 +864,7 @@ async function setService(name, optimize) {
         const data = await res.json();
         if (data.success) {
             appendLog(`[OK] Service '${name}' ${optimize ? 'stopped and disabled' : 'restored to automatic and started'}.`, "ok");
-            showToast(`${name} ${optimize ? 'disabled' : 'restored'}`, "success");
+            showToast(`${name} turned ${optimize ? 'off' : 'on'}`, "success");
             fetchServices();
         } else {
             appendLog(`[ERR] ${data.error || 'service change failed'}`, "err");
@@ -630,11 +890,12 @@ async function fetchNetworkStatus() {
         }
 
         if (data.mtu) {
-            document.getElementById("currentMtuDisplay").textContent = data.mtu;
-            document.getElementById("mtuSlider").value = data.mtu;
-            document.getElementById("mtuSliderVal").textContent = data.mtu;
+            // The slider and its label were removed from index.html when MTU was
+            // fixed at 1500. Writing to them threw on null and killed the rest of
+            // this update. applyMtu() refreshes the same badge directly.
+            const mtuBadge = document.getElementById("currentMtuDisplay");
+            if (mtuBadge) mtuBadge.textContent = data.mtu;
         }
-
         // Update TCP switches from live state
         if (data.tcpSettings) {
             lastTcp = data.tcpSettings;
@@ -810,7 +1071,9 @@ function bindEvents() {
         bindEvents.switchesBound = true;
         document.addEventListener("change", (e) => {
             const t = e.target;
-            if (t && t.matches && t.matches('input[data-tweak]')) {
+            if (t && t.matches && t.matches('select[data-enum-tweak]')) {
+                setEnumTweak(t.getAttribute("data-enum-tweak"), t.value);
+            } else if (t && t.matches && t.matches('input[data-tweak]')) {
                 setTweak(t.getAttribute("data-tweak"), t.checked);
             } else if (t && t.matches && t.matches('input[data-service]')) {
                 setService(t.getAttribute("data-service"), t.checked);
@@ -853,23 +1116,21 @@ function bindEvents() {
     if (btnPurge1) btnPurge1.addEventListener("click", purgeStandbyRam);
     if (btnPurge2) btnPurge2.addEventListener("click", purgeStandbyRam);
 
-    // MTU Slider
-    const mtuSlider = document.getElementById("mtuSlider");
-    if (mtuSlider) {
-        mtuSlider.addEventListener("input", (e) => {
-            document.getElementById("mtuSliderVal").textContent = e.target.value;
-        });
-    }
+    // MTU is fixed at 1500. The slider, the fragmentation test button and the second
+// 1500 button were all removed from index.html, so their wiring goes with them.
+// 1500 is the standard Ethernet MTU; 1280 is the IPv6 minimum and was never an
+// optimisation, it just cost throughput.
+const TARGET_MTU = 1500;
+const btnApplyGamingMtu = document.getElementById("btnApplyGamingMtu");
+if (btnApplyGamingMtu) btnApplyGamingMtu.addEventListener("click", () => applyMtu(TARGET_MTU));
 
-    // MTU Buttons
-    const btnApplyGamingMtu = document.getElementById("btnApplyGamingMtu");
-    if (btnApplyGamingMtu) btnApplyGamingMtu.addEventListener("click", () => applyMtu(1280));
-
-    const btnApplyStdMtu = document.getElementById("btnApplyStandardMtu");
-    if (btnApplyStdMtu) btnApplyStdMtu.addEventListener("click", () => applyMtu(1500));
-
-    const btnRunMtu = document.getElementById("btnRunMtuTest");
-    if (btnRunMtu) btnRunMtu.addEventListener("click", runMtuTest);
+    // Network component bindings (keep IPv4 only / restore)
+    const btnBindIpv4 = document.getElementById("btnIpv4Only");
+    if (btnBindIpv4) btnBindIpv4.addEventListener("click", () => setBindings(true));
+    const btnBindRestore = document.getElementById("btnRestoreBindings");
+    if (btnBindRestore) btnBindRestore.addEventListener("click", () => setBindings(false));
+    const btnBindRefresh = document.getElementById("btnRefreshBindings");
+    if (btnBindRefresh) btnBindRefresh.addEventListener("click", loadBindings);
 
     // DNS Benchmark
     const btnDns = document.getElementById("btnBenchmarkDns");
@@ -886,6 +1147,28 @@ function bindEvents() {
     // Debloat Services
     const btnDebloat = document.getElementById("btnDebloatServices");
     if (btnDebloat) btnDebloat.addEventListener("click", debloatServices);
+
+    // Services tab: manual refresh (start type / status are read live from SCM)
+    const btnRefSvc = document.getElementById("btnRefreshServices");
+    if (btnRefSvc) btnRefSvc.addEventListener("click", fetchServices);
+
+    // Services tab filter: 273 rows needs a way to narrow it down.
+    const svcSearch = document.getElementById("servicesSearch");
+    if (svcSearch) svcSearch.addEventListener("input", renderServiceGroups);
+    const svcOnlyMod = document.getElementById("servicesOnlyModifiable");
+    if (svcOnlyMod) svcOnlyMod.addEventListener("change", renderServiceGroups);
+
+    // Per-group bulk buttons are delegated, because the group markup is rebuilt
+    // on every refresh and on every filter keystroke.
+    const svcHost = document.getElementById("servicesGroups");
+    if (svcHost) {
+        svcHost.addEventListener("click", ev => {
+            const btn = ev.target.closest("[data-group-bulk]");
+            if (!btn) return;
+            ev.preventDefault();
+            bulkServiceGroup(btn.getAttribute("data-group-bulk"), btn.getAttribute("data-bulk-restore") === "1");
+        });
+    }
 
     // Scheduled tasks: refresh + disable-all
     const btnRefTasks = document.getElementById("btnRefreshTasks");
@@ -974,33 +1257,6 @@ async function purgeStandbyRam() {
 // -----------------------------------------------------------------------------
 // MTU & DNS API CALLS
 // -----------------------------------------------------------------------------
-async function runMtuTest() {
-    showToast("Detecting unfragmented MTU payload...", "info");
-    appendLog("[MTU] Executing ICMP packet fragmentation binary search against 1.1.1.1...");
-    
-    try {
-        const res = await fetch(`${API_BASE}/api/mtu-test`);
-        const data = await res.json();
-
-        // success=false means the binary search never received a single reply,
-        // so detectedMaxUnfragmentedMtu is still the 1252 default + 28 = 1280
-        // seed. Presenting that as a measurement is indistinguishable from a
-        // real 1280 result - and 1280 is also the hardcoded "recommended"
-        // value. Show "--" rather than a fabricated number.
-        if (data.success === false) {
-            document.getElementById("detectedMtuDisplay").textContent = "--";
-            appendLog(`[ERR] MTU test failed - no ICMP replies received. Detected MTU unavailable (target unreachable or probes blocked).`, "err");
-            showToast("MTU test failed - target unreachable", "error");
-        } else {
-            document.getElementById("detectedMtuDisplay").textContent = `${data.detectedMaxUnfragmentedMtu} bytes (Payload: ${data.detectedMaxUnfragmentedMtu - 28})`;
-            appendLog(`[OK] Max Unfragmented MTU detected: ${data.detectedMaxUnfragmentedMtu}. Recommended: 1280.`, "ok");
-            showToast(`Detected MTU: ${data.detectedMaxUnfragmentedMtu}`, "info");
-        }
-    } catch (e) {
-        appendLog(`[ERR] MTU test failed: ${e.message}`, "err");
-    }
-}
-
 async function applyMtu(val) {
     showToast(`Setting Subinterface MTU to ${val}...`, "info");
     try {
@@ -1113,31 +1369,130 @@ async function applySystemTweaks() {
 // -----------------------------------------------------------------------------
 // SERVICES & PROCESSES
 // -----------------------------------------------------------------------------
+let cachedServices = [];
+
 async function fetchServices() {
     try {
         const res = await fetch(`${API_BASE}/api/services`);
         if (!res.ok) return;
-        const list = await res.json();
-
-        const tbody = document.getElementById("servicesTableBody");
-        if (!tbody) return;
-
-        tbody.innerHTML = list.map(s => `
-            <tr>
-                <td><strong>${s.name}</strong></td>
-                <td>${s.displayName}</td>
-                <td><span class="badge ${s.impact === 'High' ? 'badge-warning' : 'badge-neutral'}">${s.impact}</span></td>
-                <td>
-                    <label class="switch switch-sm" title="ON = disabled (optimized), OFF = running">
-                        <input type="checkbox" data-service="${s.name}" ${s.isOptimized ? 'checked' : ''}>
-                        <span class="slider"></span>
-                    </label>
-                </td>
-            </tr>
-        `).join("");
+        cachedServices = await res.json();
+        renderServiceGroups();
     } catch (e) {
         console.error("fetchServices error", e);
     }
+}
+
+// Services render as ordered groups rather than one flat list, running from
+// obvious background-consumer junk down to the components Windows cannot start
+// without. A group's bulk button only ever acts on services that are individually
+// curated AND sit in a group the server marked modifiable, so Core / Security /
+// Network get no bulk action. That is enforced server-side too - the endpoint
+// rejects a non-modifiable group outright - so this is not merely hidden here.
+function renderServiceGroups() {
+    const host = document.getElementById("servicesGroups");
+    if (!host) return;
+
+    const q = ((document.getElementById("servicesSearch") || {}).value || "").trim().toLowerCase();
+    const onlyMod = (document.getElementById("servicesOnlyModifiable") || {}).checked;
+    const countEl = document.getElementById("servicesCount");
+
+    const match = s => {
+        if (onlyMod && !s.curated) return false;
+        if (!q) return true;
+        return (s.name + " " + (s.displayName || "") + " " + (s.description || "") + " " + (s.groupTitle || "")).toLowerCase().indexOf(q) !== -1;
+    };
+    // The server already returns only changeable services; this is belt-and-braces
+    // so a read-only row can never reach the UI even if the payload changes.
+
+    // Keep the server's group ordering (it already sorts by its own group table),
+    // so group here without re-sorting the groups themselves.
+    const groups = [];
+    const seen = {};
+    cachedServices.forEach(s => {
+        if (!seen[s.group]) {
+            seen[s.group] = { id: s.group, title: s.groupTitle, modifiable: s.groupModifiable, desc: s.groupDesc || "", items: [] };
+            groups.push(seen[s.group]);
+        }
+        if (s.groupDesc) seen[s.group].desc = s.groupDesc;
+        seen[s.group].items.push(s);
+    });
+
+    let shown = 0;
+    const html = groups.map(g => {
+        const items = g.items.filter(match);
+        if (!items.length) return "";
+        shown += items.length;
+        const cur = items.filter(s => s.curated);
+        // Both actions are always offered as separate buttons. An earlier single
+        // button flipped between "Disable group" and "Restore group" based on
+        // current state, so a group where everything was already off offered no
+        // way to express "disable all" - which is the action that was asked for.
+        // The button that would be a no-op is disabled instead of hidden.
+        const canBulk = g.modifiable && cur.length > 0;
+        const allOff = canBulk && cur.every(s => s.isOptimized);
+        const noneOff = canBulk && cur.every(s => !s.isOptimized);
+        return `
+        <div class="adv-group" data-group="${escapeHtml(g.id)}">
+            <div class="adv-group-title">
+                ${escapeHtml(g.title)}
+                <span class="adv-group-n">${items.length}</span>
+                ${canBulk
+                    ? `<span style="display:inline-flex; gap:6px;">
+                        <button class="btn btn-primary btn-sm" data-group-bulk="${escapeHtml(g.id)}" data-bulk-restore="0" ${allOff ? "disabled" : ""}>Disable all</button>
+                        <button class="btn btn-secondary btn-sm" data-group-bulk="${escapeHtml(g.id)}" data-bulk-restore="1" ${noneOff ? "disabled" : ""}>Restore all</button>
+                    </span>`
+                    : `<span class="badge badge-neutral" title="No bulk action for this group">no bulk action</span>`}
+            </div>
+            <p style="font-size:0.76rem; color:var(--text-secondary); margin:2px 0 10px;">
+                ${escapeHtml(g.desc || "")}
+            </p>
+            <div class="tweak-list">
+                ${items.map(s => `
+                <div class="tweak-item">
+                    <div class="tweak-left">
+                        <div class="tweak-name">
+                            ${escapeHtml(s.name)}
+                            <span class="badge badge-neutral">${escapeHtml(s.startType || "?")}</span>
+                            ${s.status ? `<span class="badge ${s.status === "Running" ? "badge-active" : "badge-neutral"}">${escapeHtml(s.status)}</span>` : ""}
+                        </div>
+                        <div class="tweak-desc">${escapeHtml(s.displayName || "")}</div>
+                        ${s.description ? `<div class="tweak-desc" style="opacity:0.75;">${escapeHtml(s.description)}</div>` : ""}
+                    </div>
+                    <label class="switch" title="ON = disabled (optimized), OFF = running">
+                        <input type="checkbox" data-service="${escapeHtml(s.name)}" ${s.isOptimized ? "checked" : ""}>
+                        <span class="slider"></span>
+                    </label>
+                </div>`).join("")}
+            </div>
+        </div>`;
+    }).join("");
+
+    host.innerHTML = html || `<p style="color:var(--text-muted); font-size:0.78rem;">No services match that filter.</p>`;
+    if (countEl) countEl.textContent = `${shown} of ${cachedServices.length}`;
+}
+
+async function bulkServiceGroup(groupId, restore) {
+    const g = cachedServices.find(s => s.group === groupId);
+    const title = g ? g.groupTitle : groupId;
+    showToast(restore ? `Restoring ${title}…` : `Disabling ${title}…`, "info");
+    try {
+        const res = await fetch(`${API_BASE}/api/services/group`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ group: groupId, optimize: !restore })
+        });
+        const data = await res.json();
+        if (data.success) {
+            appendLog(`[OK] ${title}: ${data.changed} service(s) ${restore ? "restored" : "disabled"}.`, "ok");
+            showToast(`${data.changed} service(s) ${restore ? "restored" : "disabled"}`, "success");
+        } else {
+            appendLog(`[ERR] ${title}: ${data.error || "failed"}`, "err");
+            showToast(data.error || "Bulk change failed", "error");
+        }
+    } catch (e) {
+        showToast(`Bulk change failed: ${e.message}`, "error");
+    }
+    fetchServices();
 }
 
 async function debloatServices() {
@@ -1182,8 +1537,12 @@ async function fetchTasks() {
     }
 }
 
+// Same defect as setService, and this is very likely the exact string the human
+// saw: the tasks table column is headed "Off", the switch reads
+// "ON = disabled (optimized), OFF = enabled", and the old toast answered a
+// false->true change with "Enabling scheduled task...".
 async function setTask(path, disabled) {
-    showToast(`${disabled ? 'Disabling' : 'Enabling'} scheduled task...`, "info");
+    showToast(`Turning scheduled task ${disabled ? 'off' : 'on'}...`, "info");
     try {
         const res = await fetch(`${API_BASE}/api/tasks/set`, {
             method: "POST",
@@ -1193,7 +1552,7 @@ async function setTask(path, disabled) {
         const data = await res.json();
         if (data.success) {
             appendLog(`[OK] Task '${path}' ${disabled ? 'disabled' : 're-enabled'}.`, "ok");
-            showToast(`Task ${disabled ? 'disabled' : 're-enabled'}`, "success");
+            showToast(`Task turned ${disabled ? 'off' : 'on'}`, "success");
             fetchTasks();
         } else {
             appendLog(`[ERR] ${data.error || 'task change failed'}`, "err");
@@ -1374,5 +1733,61 @@ async function toggleStartupApp(name, scope, enabled) {
         appendLog(`[ERR] Failed to toggle startup app ${name}: ${e.message}`, "err");
         showToast("Startup toggle failed: " + e.message, "error");
         fetchStartupApps();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NETWORK COMPONENT BINDINGS
+// Every component the active adapter is bound to, and whether it is enabled.
+// ipv4Only=true disables everything except ms_tcpip. false restores exactly what
+// the disable path recorded, so this is not a guess at a "default" set.
+// ---------------------------------------------------------------------------
+async function loadBindings() {
+    const host = document.getElementById("bindingsList");
+    if (!host) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/network/bindings`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const rows = Array.isArray(data.bindings) ? data.bindings : [];
+        if (!rows.length) {
+            host.innerHTML = `<span style="color:var(--text-muted);">No adapter bindings reported.</span>`;
+            return;
+        }
+        host.innerHTML = rows.map(r => {
+            const on = !!r.enabled;
+            const col = on ? "var(--text-primary)" : "var(--text-muted)";
+            const mark = on
+                ? `<span style="color:#ff6b6b; font-weight:700;">ON</span>`
+                : `<span style="opacity:0.55;">off</span>`;
+            return `<div style="display:flex; justify-content:space-between; gap:12px; padding:4px 0; border-bottom:1px solid var(--border-subtle);">
+                <span style="color:${col}; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(r.display || r.component)}</span>
+                <span style="font-family:var(--font-mono); flex-shrink:0;">${mark}</span>
+            </div>`;
+        }).join("");
+    } catch (e) {
+        host.innerHTML = `<span style="color:#ff6b6b;">Could not read bindings: ${escapeHtml(e.message)}</span>`;
+    }
+}
+
+async function setBindings(ipv4Only) {
+    const host = document.getElementById("bindingsList");
+    const label = ipv4Only ? "Disabling every component except IPv4" : "Restoring components";
+    showToast(label + "...", "info");
+    appendLog(`[NET-BIND] ${label}...`);
+    try {
+        const res = await fetch(`${API_BASE}/api/network/bindings`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ipv4Only })
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        (data.logs || []).forEach(l => appendLog(`[NET-BIND] ${l}`, "info"));
+        showToast(ipv4Only ? "IPv4-only mode applied" : "Components restored", "success");
+        await loadBindings();
+    } catch (e) {
+        appendLog(`[ERR] Network components failed: ${e.message}`, "err");
+        showToast("Network component change failed", "error");
     }
 }

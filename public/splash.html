@@ -5,8 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Windows Tweaks — Loading</title>
 <style>
+  /* ==========================================================================
+     SPLASH - black stage, white W, then out.
+     One motion language, shared with the in-app #bootOverlay and with
+     public/css/style.css. The two easing curves below are the canonical ones
+     from style.css :root; splash.html is a separate document with its own
+     <style> and cannot read that file, so they are repeated rather than
+     reinvented differently.
+     ========================================================================== */
+  :root {
+    --ease-out-expo: cubic-bezier(0.32, 0.72, 0, 1);
+    --ease-sheen:     cubic-bezier(0.45, 0, 0.55, 1);
+    --dur-sheen: 0.9s;
+  }
+
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-font-smoothing: antialiased; }
   html, body { height: 100%; }
+
   body {
     background: #000;
     color: #fff;
@@ -14,65 +29,241 @@
     display: flex; align-items: center; justify-content: center;
     min-height: 100vh; overflow: hidden; user-select: none;
     -webkit-app-region: drag;
-    background-image:
-      radial-gradient(ellipse 90% 45% at 50% -8%, rgba(255,255,255,0.16) 0%, transparent 60%),
-      radial-gradient(ellipse 60% 35% at 50% 110%, rgba(255,255,255,0.06) 0%, transparent 60%),
-      linear-gradient(180deg, #0c0c0f 0%, #000 55%, #000 100%);
+    /* Pure black stage. The W is the only lit thing in it. */
+    background-image: radial-gradient(ellipse 55% 38% at 50% 46%, rgba(255,255,255,0.055) 0%, transparent 62%);
   }
-  .wrap { width: 340px; text-align: center; animation: rise .5s cubic-bezier(.32,.72,0,1) both; }
-  @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-  .logo {
-    width: 84px; height: 84px; margin: 0 auto 20px; border-radius: 22px; overflow: hidden;
-    background: linear-gradient(180deg,#fff,#c7c7cc);
-    border: 1px solid rgba(255,255,255,.5);
-    box-shadow: 0 8px 40px rgba(255,255,255,.25), inset 0 1px 1px rgba(255,255,255,.9);
-  }
-  .logo img { width: 100%; height: 100%; object-fit: cover; filter: grayscale(100%) contrast(1.05); }
-  h1 {
-    font-size: 1.2rem; font-weight: 800; letter-spacing: .2em; text-indent: .2em;
-    background: linear-gradient(180deg,#fff 20%,#a8a8b0 100%);
-    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
-  }
-  .sub { margin-top: 6px; font-size: .62rem; letter-spacing: .28em; text-indent: .28em; color: #7a7a85; font-family: Consolas, monospace; }
-  .tag {
-    display: inline-block; margin-top: 12px; font-size: .6rem; font-family: Consolas, monospace; font-weight: 600;
-    letter-spacing: .1em; padding: 4px 12px; border-radius: 999px;
-    background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.18); color: #fff;
-  }
-  .bar { margin-top: 28px; height: 6px; border-radius: 4px; background: rgba(255,255,255,.1); overflow: hidden; }
-  #fill {
-    height: 100%; width: 2%; border-radius: 4px;
-    background: linear-gradient(90deg,#6e6e73,#fff);
-    box-shadow: 0 0 14px rgba(255,255,255,.55);
-    transition: width .35s cubic-bezier(.32,.72,0,1);
+
+  .stage {
     position: relative;
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; min-height: 100vh;
   }
-  #fill::after {
+
+  .wrap {
+    position: relative; z-index: 1;
+    width: 340px; text-align: center;
+    animation: rise 0.55s var(--ease-out-expo) both;
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+
+  /* -- concentric rings radiating out from behind the W -------------------
+     These sit inside .logo-stage rather than being centred on .stage, so they
+     emanate from the letter itself. Centring them on the stage put them around
+     the title instead, which read as a stray circle across the text. */
+  .logo-stage {
+    position: relative;
+    width: 104px; height: 104px;
+    margin: 0 auto 26px;
+  }
+  .rings {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 104px; height: 104px;
+    margin: -52px 0 0 -52px;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .rings i {
+    position: absolute; inset: 0;
+    border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.42);
+    opacity: 0;
+    animation: ringOut 2.6s cubic-bezier(0.2, 0.6, 0.2, 1) infinite;
+  }
+  .rings i:nth-child(2) { animation-delay: 0.86s; }
+  .rings i:nth-child(3) { animation-delay: 1.72s; }
+  @keyframes ringOut {
+    0%   { transform: scale(0.55); opacity: 0; }
+    12%  { opacity: 0.85; }
+    100% { transform: scale(3.1); opacity: 0; }
+  }
+
+  .wrap {
+    position: relative; z-index: 1;
+    width: 340px; text-align: center;
+    animation: rise 0.55s var(--ease-out-expo) both;
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+
+  /* -- the W ---------------------------------------------------------------
+     The asset is a white Georgia W on a near-black gradient. The old tile was a
+     white gradient plate with a white glow, which described the previous art
+     (a black B on white) and nothing else. It is now a dark plate, so the
+     letter reads against the same ground it sits on in the app. */
+  .logo {
+    position: relative;
+    width: 104px; height: 104px;
+    border-radius: 26px; overflow: hidden;
+    background: #0b0b0e;
+    border: 1px solid rgba(255,255,255,0.10);
+    isolation: isolate;
+    animation: logoIn 0.85s var(--ease-out-expo) both,
+               wGlow 3.1s ease-in-out 0.85s infinite;
+  }
+  @keyframes logoIn {
+    from { opacity: 0; transform: scale(0.84) rotate(-4deg); }
+    to   { opacity: 1; transform: scale(1) rotate(0); }
+  }
+  /* Breathing halo. Kept separate from logoIn so the two can run at different
+     rates without one restarting the other. */
+  @keyframes wGlow {
+    0%, 100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.06), 0 12px 48px rgba(255,255,255,0.14); }
+    50%      { box-shadow: 0 0 0 1px rgba(255,255,255,0.14), 0 16px 74px rgba(255,255,255,0.30); }
+  }
+
+  /* The W occupies ~51% of the image width and ~36% of its height, so at 1:1 in
+     a 104px tile the letter renders about 36px tall. Scaling up and letting the
+     tile clip is what makes the letter the subject rather than the plate. */
+  .logo img {
+    width: 100%; height: 100%; object-fit: cover;
+    transform: scale(1.72); transform-origin: 50% 47%;
+    display: block;
+  }
+
+  /* Travelling light: a diagonal band swept across the letter. `screen` lifts the
+     already-white W to a bloom where the band crosses it and barely touches the
+     near-black ground, so the sweep reads as light on the letter rather than a
+     rectangle sliding past. Four passes, then it holds - it must never still be
+     moving once the app is usable. */
+  .logo::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(105deg,
+      transparent 36%,
+      rgba(255,255,255,.12) 44%,
+      rgba(255,255,255,.95) 50%,
+      rgba(255,255,255,.12) 56%,
+      transparent 64%);
+    transform: translateX(-130%);
+    mix-blend-mode: screen;
+    animation: logoSheen var(--dur-sheen) var(--ease-sheen) 0.55s 4 both;
+  }
+  @keyframes logoSheen {
+    from { transform: translateX(-130%); }
+    to   { transform: translateX(130%); }
+  }
+
+  /* -- type ---------------------------------------------------------------
+     Wiped in with a clip-path rather than faded, so it reads as the letters being
+     laid down rather than appearing. */
+  .splash-title {
+    font-size: 1.24rem; font-weight: 800; letter-spacing: .26em; text-indent: .26em;
+    background: linear-gradient(180deg, #fff 22%, #b8b8c0 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+    animation: wipe 0.8s var(--ease-out-expo) 0.28s both;
+  }
+  @keyframes wipe {
+    from { clip-path: inset(0 100% 0 0); transform: translateY(6px); }
+    to   { clip-path: inset(0 0 0 0);   transform: none; }
+  }
+
+  .sub {
+    margin-top: 10px;
+    font-size: 0.62rem; letter-spacing: 0.44em; text-indent: 0.44em;
+    font-weight: 600; color: rgba(255,255,255,0.42);
+    animation: fadeUp 0.7s var(--ease-out-expo) 0.52s both;
+  }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+  .tag {
+    display: inline-block; margin-top: 16px;
+    padding: 5px 12px; border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.035);
+    font-family: ui-monospace, 'SF Mono', Consolas, monospace;
+    font-size: 0.58rem; letter-spacing: 0.16em;
+    color: rgba(255,255,255,0.52);
+    animation: fadeUp 0.7s var(--ease-out-expo) 0.66s both;
+  }
+
+  /* -- progress ----------------------------------------------------------- */
+  .bar {
+    margin-top: 26px; height: 3px; border-radius: 999px;
+    background: rgba(255,255,255,0.08); overflow: hidden;
+    animation: fadeUp 0.6s var(--ease-out-expo) 0.8s both;
+  }
+  .bar > div {
+    height: 100%; width: 0%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(255,255,255,0.35), #fff 70%, rgba(255,255,255,0.85));
+    box-shadow: 0 0 14px rgba(255,255,255,0.55);
+    transition: width 0.45s var(--ease-out-expo);
+    position: relative; overflow: hidden;
+  }
+  /* A second, faster highlight travelling along the filled portion, so the bar
+     looks alive even while the percentage is not changing. */
+  .bar > div::after {
     content: ""; position: absolute; inset: 0;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,.7), transparent);
-    animation: shimmer 1.4s linear infinite;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.9), transparent);
+    transform: translateX(-100%);
+    animation: barShimmer 1.5s ease-in-out infinite;
   }
-  @keyframes shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
-  .row { display: flex; justify-content: space-between; align-items: baseline; margin-top: 10px; }
-  #pct { font-family: Consolas, monospace; font-size: .8rem; font-weight: 600; color: #fff; font-variant-numeric: tabular-nums; }
-  #status { font-family: Consolas, monospace; font-size: .7rem; color: #b8b8c0; min-height: 1.1em; margin-top: 12px; transition: opacity .2s; }
-  .cool { margin-top: 22px; font-size: .72rem; color: #7a7a85; min-height: 2.2em; line-height: 1.5; }
-  .dots::after { content: ""; animation: dots 1.2s steps(4) infinite; }
+  @keyframes barShimmer {
+    0%   { transform: translateX(-100%); }
+    60%, 100% { transform: translateX(100%); }
+  }
+
+  .row {
+    margin-top: 12px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-family: ui-monospace, 'SF Mono', Consolas, monospace;
+    font-size: 0.62rem; color: rgba(255,255,255,0.44);
+    animation: fadeUp 0.6s var(--ease-out-expo) 0.9s both;
+  }
+  .dots::after {
+    content: ""; animation: dots 1.4s steps(4, end) infinite;
+  }
   @keyframes dots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
-  .foot { margin-top: 26px; font-size: .6rem; letter-spacing: .2em; color: #3a3a3e; font-family: Consolas, monospace; }
+
+  .cool {
+    margin-top: 26px;
+    font-size: 0.68rem; color: rgba(255,255,255,0.30);
+    transition: opacity 0.2s ease;
+    animation: fadeUp 0.6s var(--ease-out-expo) 1.05s both;
+  }
+
+  /* Pinned to the bottom of the stage, not of .wrap. .wrap is position:relative
+     (it carries the z-index that lifts it above the rings), so a .foot left
+     inside it resolved against .wrap and landed just under the progress row
+     instead of at the foot of the window. It is a direct child of .stage for
+     that reason - do not move it back inside .wrap. */
+  .foot {
+    position: absolute; bottom: 26px; left: 0; right: 0;
+    text-align: center;
+    font-size: 0.58rem; letter-spacing: 0.2em;
+    color: rgba(255,255,255,0.20);
+    animation: fadeUp 0.6s var(--ease-out-expo) 1.2s both;
+  }
+
+  /* Reduced motion removes movement, never content. The logo stays lit and
+     fully opaque; only the sweep, the rings and the wipes stop. */
+  @media (prefers-reduced-motion: reduce) {
+    .logo::after, .rings i, .bar > div::after, .dots::after { display: none; }
+    .logo, .wrap, .splash-title, .sub, .tag, .bar, .row, .cool, .foot {
+      animation: none !important;
+      opacity: 1 !important;
+      transform: none !important;
+      clip-path: none !important;
+    }
+  }
 </style>
 </head>
 <body>
+<div class="stage">
   <div class="wrap">
-    <div class="logo"><img src="assets/logo.jpg" alt="Windows Tweaks" onerror="this.style.display='none'"></div>
+    <div class="logo-stage">
+      <div class="rings" aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="logo"><img src="assets/logo.jpg?v=3.1.5" alt="Windows Tweaks" onerror="this.style.display='none'"></div>
+    </div>
     <h1 class="splash-title">WINDOWS TWEAKS</h1>
     <div class="sub">OPTIMIZATIONS</div>
-    <div class="tag">v2.5.6 KERNEL EDITION</div>
+    <div class="tag">v3.1.5 KERNEL EDITION</div>
     <div class="bar"><div id="fill"></div></div>
     <div class="row"><span id="status" class="dots">Waking the engine</span><span id="pct">0%</span></div>
-    <div class="cool" id="cool">Polishing every pixel…</div>
-    <div class="foot">ULTRA-LOW LATENCY SUITE</div>
+    <div class="cool" id="cool">Polishing every pixel.</div>
   </div>
+  <div class="foot">Windows Optimizations for Gaming</div>
+</div>
 <script>
 (function () {
   var fill = document.getElementById('fill');
@@ -128,6 +319,17 @@
       onReal(pct + Math.random() * 7, null);
     }, 450);
   }
+
+  // The main window is mounted behind this one. Once that window exists, fade
+  // the splash out rather than yanking it: the stage scales down slightly and
+  // dims, so the reveal is a dissolve into the tool instead of a cut.
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function dissolve() {
+    document.body.style.transition = 'opacity ' + (reduce ? '0.18s' : '0.42s') + ' cubic-bezier(0.32,0.72,0,1), transform ' + (reduce ? '0.18s' : '0.42s') + ' cubic-bezier(0.32,0.72,0,1)';
+    document.body.style.opacity = '0';
+    document.body.style.transform = 'scale(0.965)';
+  }
+  window.splashDissolve = dissolve;
 })();
 </script>
 </body>

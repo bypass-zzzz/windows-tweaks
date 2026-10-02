@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src http://127.0.0.1:48921 http://127.0.0.1:48922; script-src 'self' 'unsafe-inline'">
-    <title>Windows Tweaks // Ultra-Low Latency & High Performance Suite</title>
+    <title>Windows Tweaks // Windows Optimizations for Gaming</title>
     <link rel="stylesheet" href="css/style.css">
     <link rel="icon" type="image/jpeg" href="assets/logo.jpg">
     <script>
@@ -18,8 +18,8 @@
     </script>
     <style>
         .titlebar { -webkit-app-region: drag; height: 0; position: fixed; top: 0; left: 0; right: 160px; z-index: 9999; }
-        .win-controls { -webkit-app-region: no-drag; position: fixed; top: 0; right: 0; display: flex; align-items: center; z-index: 10000; height: 40px; }
-        .win-btn { width: 46px; height: 40px; background: transparent; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.4); transition: background 0.15s, color 0.15s; }
+        .win-controls { -webkit-app-region: no-drag; position: absolute; top: 0; right: 0; display: flex; align-items: center; z-index: 10000; height: 40px; }
+        .win-btn { -webkit-app-region: no-drag; width: 46px; height: 40px; background: transparent; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.4); transition: background 0.15s, color 0.15s; }
         .win-btn:hover { background: rgba(255,255,255,0.08); color: #fff; }
         .win-btn.close-btn:hover { background: #e81123; color: #fff; }
         .app-header { -webkit-app-region: drag; }
@@ -30,8 +30,9 @@
 
     <!-- Instant boot overlay: visible before JS/API loads (covers start.bat browser mode too) -->
     <div id="bootOverlay">
+        <div class="boot-rings" aria-hidden="true"><i></i><i></i><i></i></div>
         <div class="boot-inner">
-            <div class="boot-logo">B</div>
+            <div class="boot-logo"><img src="assets/logo.jpg?v=3.1.5" alt="" onerror="this.parentNode.classList.add('boot-logo-fallback');this.remove()"></div>
             <div class="boot-title">WINDOWS TWEAKS</div>
             <div class="boot-bar"><div class="boot-fill"></div></div>
             <div class="boot-status" id="bootStatus">Warming up the engine…</div>
@@ -40,30 +41,19 @@
 
     <!-- Electron Frameless Titlebar -->
     <div class="titlebar"></div>
-    <div class="win-controls">
-        <button class="win-btn" id="winMinimize" title="Minimize">
-            <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
-        </button>
-        <button class="win-btn" id="winMaximize" title="Maximize">
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><rect x="0.5" y="0.5" width="9" height="9"/></svg>
-        </button>
-        <button class="win-btn close-btn" id="winClose" title="Close">
-            <svg width="10" height="10" viewBox="0 0 10 10"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.2"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.2"/></svg>
-        </button>
-    </div>
 
     <!-- TOP HEADER -->
     <header class="app-header">
         <div class="brand-wrapper">
             <div class="brand-logo-badge">
-                <img src="assets/logo.jpg" alt="B" class="brand-logo-img">
+                <img src="assets/logo.jpg?v=3.1.5" alt="Windows Tweaks" class="brand-logo-img">
             </div>
             <div class="brand-info">
                 <div class="brand-title">
                     WINDOWS TWEAKS
-                    <span class="brand-tag">v2.5.6 KERNEL EDITION</span>
+                    <span class="brand-tag">v3.1.5 KERNEL EDITION</span>
                 </div>
-                <div class="brand-subtitle">ULTRA-LOW LATENCY & ZERO-BLOAT PERFORMANCE SUITE</div>
+                <div class="brand-subtitle">Windows Optimizations for Gaming</div>
             </div>
         </div>
 
@@ -83,6 +73,22 @@
             <button id="btnThemeToggle" class="theme-toggle" title="Switch between Monochrome and Obsidian (black &amp; red)">
                 <span class="dot"></span>
                 <span id="themeToggleLabel">Mono</span>
+            </button>
+        </div>
+
+        <!-- Frameless window controls. These MUST remain a DESCENDANT of .app-header:
+             Chromium only reliably subtracts a no-drag region from a drag region when
+             the no-drag element is nested inside it. As a sibling, the native drag area
+             swallowed hover and clicks on minimize/maximize/close. -->
+        <div class="win-controls">
+            <button class="win-btn" id="winMinimize" title="Minimize">
+                <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+            </button>
+            <button class="win-btn" id="winMaximize" title="Maximize">
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><rect x="0.5" y="0.5" width="9" height="9"/></svg>
+            </button>
+            <button class="win-btn close-btn" id="winClose" title="Close">
+                <svg width="10" height="10" viewBox="0 0 10 10"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.2"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.2"/></svg>
             </button>
         </div>
     </header>
@@ -109,13 +115,17 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
             Startup Apps
         </button>
+        <button class="nav-tab" data-tab="tab-services">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
+            Services
+        </button>
         <button class="nav-tab" data-tab="tab-advanced">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
             Performance Tweaks
         </button>
         <button class="nav-tab" data-tab="tab-routing">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="6 3 20 12 6 21 6 3"/></svg>
-            Gaming Tweaks
+            General Tweaks
         </button>
         <button class="nav-tab" data-tab="tab-terminal">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
@@ -258,47 +268,31 @@
 
         <!-- TAB 2: NETWORK & PING LAB -->
         <section id="tab-network" class="tab-pane">
-            <div class="grid-cols-2">
-                
+            <div style="display:flex; gap:20px; align-items:flex-start; margin-bottom:20px;">
+                <div style="flex:1 1 0; min-width:0; display:flex; flex-direction:column; gap:20px;">
                 <!-- MTU Optimization -->
                 <div class="card">
                     <div class="card-header">
                         <div class="card-title">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
-                            MTU Zero-Fragmentation Tuner
+                            MTU
                         </div>
-                        <button id="btnRunMtuTest" class="btn btn-secondary btn-sm">Test Fragmentation</button>
                     </div>
                     <p style="font-size:0.78rem; color:var(--text-secondary); margin-bottom:16px;">
-                        Standard 1500 MTU causes packet fragmentation on high-tick gaming servers. Tuning MTU to 1280 guarantees zero packet fragmentation and lowers transmission queue latency.
+                        1500 is the standard Ethernet MTU and the fastest setting. This app used to force 1280 on the belief that a smaller packet always means less latency, which is backwards - 1280 is the IPv6 minimum, not an optimisation. The fragmentation probe that decided this at runtime was unreliable, so the value is simply fixed at 1500.
                     </p>
-                    
                     <div style="background:rgba(255,255,255,0.02); padding:16px; border-radius:var(--radius-md); border:1px solid var(--border-subtle); margin-bottom:16px;">
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
                             <span style="font-size:0.82rem; font-weight:600;">Active Subinterface MTU:</span>
-                            <span id="currentMtuDisplay" class="badge badge-active" style="font-size:0.84rem;">1280</span>
+                            <span id="currentMtuDisplay" class="badge badge-active" style="font-size:0.84rem;">-</span>
                         </div>
-                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-                            <span style="font-size:0.76rem; color:var(--text-muted);">Detected Max Unfragmented:</span>
-                            <span id="detectedMtuDisplay" style="font-family:var(--font-mono); font-size:0.78rem; color:#fff;">Run test to detect</span>
-                        </div>
-                        
-                        <div style="margin-top:14px;">
-                            <div style="display:flex; justify-content:space-between; font-size:0.74rem; font-family:var(--font-mono); margin-bottom:6px;">
-                                <span>1280 (Ultra Gaming)</span>
-                                <span id="mtuSliderVal">1280</span>
-                                <span>1500 (Standard)</span>
-                            </div>
-                            <input type="range" min="1280" max="1500" step="10" value="1280" class="range-slider" id="mtuSlider">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <span style="font-size:0.76rem; color:var(--text-muted);">Target:</span>
+                            <span style="font-family:var(--font-mono); font-size:0.78rem; color:#fff;">1500</span>
                         </div>
                     </div>
-
-                    <div style="display:flex; gap:10px;">
-                        <button id="btnApplyGamingMtu" class="btn btn-primary btn-sm" style="flex:1;">Set Gaming MTU (1280)</button>
-                        <button id="btnApplyStandardMtu" class="btn btn-secondary btn-sm" style="flex:1;">Set Default (1500)</button>
-                    </div>
+                    <button id="btnApplyGamingMtu" class="btn btn-primary btn-sm" style="width:100%;">Set Best MTU (1500)</button>
                 </div>
-
                 <!-- DNS Benchmark & Switcher -->
                 <div class="card">
                     <div class="card-header">
@@ -344,6 +338,32 @@
                             </tbody>
                         </table>
                     </div>
+                </div>
+                </div>
+                <div style="flex:1 1 0; min-width:0; display:flex; flex-direction:column; gap:20px;">
+                <!-- Network Components (bindings) -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                            Network Components
+                        </div>
+                        <button id="btnRefreshBindings" class="btn btn-secondary btn-sm">Refresh</button>
+                    </div>
+                    <p style="font-size:0.78rem; color:var(--text-secondary); margin-bottom:12px;">
+                        Everything your active adapter is bound to, and whether it is on. "Keep IPv4 Only" turns off every component except IPv4 on the adapters that are actually up.
+                    </p>
+                    <div class="badge badge-warning" style="display:block; margin-bottom:14px; line-height:1.5;">
+                        Disabling IPv6 breaks real software on modern Windows - Steam, some browsers, Windows Update and several VPN clients. Disabling Client for Microsoft Networks can break SMB and domain sign-in. Restore puts back exactly what was changed.
+                    </div>
+                    <div id="bindingsList" style="display:flex; flex-direction:column; gap:6px; margin-bottom:14px; font-size:0.8rem;">
+                        <span style="color:var(--text-muted);">Loading component list...</span>
+                    </div>
+                    <div style="display:flex; gap:10px;">
+                        <button id="btnIpv4Only" class="btn btn-primary btn-sm" style="flex:1;">Keep IPv4 Only</button>
+                        <button id="btnRestoreBindings" class="btn btn-secondary btn-sm" style="flex:1;">Restore Components</button>
+                    </div>
+                </div>
                 </div>
             </div>
 
@@ -391,8 +411,8 @@
                         <!-- Receive Side Scaling -->
                         <div class="tweak-item">
                             <div class="tweak-left">
-                                <div class="tweak-name">Receive Side Scaling (RSS) & FastOpen</div>
-                                <div class="tweak-desc">Spreads network processing across CPU threads with zero-RTT FastOpen. Windows enables RSS by default — OFF explicitly disables it.</div>
+                                <div class="tweak-name">Receive Side Scaling (RSS)</div>
+                                <div class="tweak-desc">Spreads network processing across CPU threads. Windows already enables RSS by default, so this only makes sure it is on - and turning it OFF now restores that default instead of disabling it. It does not set FastOpen.</div>
                             </div>
                             <label class="switch" title="ON = optimized, OFF = Windows default"><input type="checkbox" data-tweak="rss"><span class="slider"></span></label>
                         </div>
@@ -403,7 +423,7 @@
                                 <div class="tweak-name">NIC Hardware Checksum Offloading</div>
                                 <div class="tweak-desc">Shifts packet checksum math to NIC hardware (Realtek 2.5GbE), relieving CPU cycles.</div>
                             </div>
-                            <span class="badge badge-neutral" title="Applied by bulk network tweaks">Bulk</span>
+                            <span class="badge badge-neutral" title="Applied by the Apply Network Tweaks button">Via Network Tweaks</span>
                         </div>
 
                         <!-- Energy Efficient Ethernet -->
@@ -412,7 +432,7 @@
                                 <div class="tweak-name">Disable Energy Efficient Ethernet (EEE)</div>
                                 <div class="tweak-desc">Prevents NIC from entering micro-sleep states during quiet moments, eliminating wake-up lag.</div>
                             </div>
-                            <span class="badge badge-neutral" title="Applied by bulk network tweaks">Bulk</span>
+                            <span class="badge badge-neutral" title="Applied by the Apply Network Tweaks button">Via Network Tweaks</span>
                         </div>
 
                         <div class="tweak-item">
@@ -496,7 +516,7 @@
                                 <div class="tweak-name">Elevate GPU MSI Interrupt Priority to HIGH</div>
                                 <div class="tweak-desc">Sets AMD RX 6750 XT / NVIDIA interrupt priority to Priority 1 (High) for instant frame dispatch.</div>
                             </div>
-                            <span class="badge badge-neutral" title="Applied by bulk kernel tweaks">Bulk</span>
+                            <span class="badge badge-neutral" title="Applied by the Apply Kernel Tweaks button">Via Kernel Tweaks</span>
                         </div>
                     </div>
                 </div>
@@ -538,8 +558,9 @@
 
                         <div class="tweak-item">
                             <div class="tweak-left">
-                                <div class="tweak-name">Ultimate Performance Power Scheme & USB Suspend</div>
-                                <div class="tweak-desc">Unlocks hidden Ultimate Performance power plan and disables USB selective sleep for zero mouse lag.</div>
+                                <div class="tweak-name">Hybred Low Latency Power Scheme &amp; USB Suspend</div>
+                                <div class="tweak-desc">Applies the Hybred Low Latency plan and disables USB selective sleep. It differs from Ultimate Performance in 35 power settings, and the ones that matter keep the CPU out of its idle states and out of boost ramp-down, so it stays at full clock instead of dropping between frames. Costs higher idle heat and fan noise.</div>
+                                <div class="laptop-warning">Not recommended for laptops with bad cooling</div>
                             </div>
                             <label class="switch" title="ON = optimized, OFF = Windows default"><input type="checkbox" data-tweak="powerPlan"><span class="slider"></span></label>
                         </div>
@@ -625,35 +646,11 @@
         <section id="tab-processes" class="tab-pane">
             <div class="grid-cols-2">
                 
-                <!-- Windows Services Debloater -->
-                <div class="card">
-                    <div class="card-header">
-                        <div class="card-title">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                            Background Telemetry & Services Debloater
-                        </div>
-                        <button id="btnDebloatServices" class="btn btn-primary btn-sm">Disable Telemetry</button>
-                    </div>
-                    <p style="font-size:0.78rem; color:var(--text-secondary); margin-bottom:12px;">
-                        Safe, curated telemetry services that run invisibly in the background, consuming CPU interrupts and network bandwidth. Switch ON = disabled (optimized), OFF = restored.
-                    </p>
-
-                    <div class="table-wrapper" style="max-height: 280px; overflow-y:auto;">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Service</th>
-                                    <th>Function</th>
-                                    <th>Impact</th>
-                                    <th>Off</th>
-                                </tr>
-                            </thead>
-                            <tbody id="servicesTableBody">
-                                <tr><td colspan="4" style="text-align:center; color:var(--text-muted);">Probing services…</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
+                <!-- Windows Services Debloater: MOVED to the dedicated Services tab.
+                     Keeping a second copy of these switches here would mean two
+                     controls writing one service Start value, which is the same
+                     conflict that caused the SystemResponsiveness double-writer.
+                     The Services tab is now the single home for them. -->
 
                 <!-- Live Process Manager -->
                 <div class="card">
@@ -760,6 +757,40 @@
             </div>
         </section>
 
+        <!-- TAB: SERVICES -->
+        <section id="tab-services" class="tab-pane">
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
+                        Windows Services
+                    </div>
+                    <div style="display:flex; gap:8px;">
+                        <button id="btnRefreshServices" class="btn btn-secondary btn-sm">Refresh</button>
+                        <button id="btnDebloatServices" class="btn btn-primary btn-sm">Disable Telemetry Services</button>
+                    </div>
+                </div>
+                <p style="font-size:0.78rem; color:var(--text-secondary); margin-bottom:12px;">
+                    Curated services that run invisibly in the background, consuming CPU interrupts and network bandwidth.
+                    Switch <strong>ON = disabled (optimized)</strong>, OFF = restored to Windows default.
+                    Start type and live status are read from the Service Control Manager, not assumed.
+                </p>
+
+                <div style="display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; align-items:center;">
+                    <input type="search" id="servicesSearch" placeholder="Filter by name, function or description…" style="flex:1; min-width:220px;" aria-label="Filter services">
+                    <label style="display:flex; align-items:center; gap:6px; font-size:0.76rem; color:var(--text-secondary); white-space:nowrap;">
+                        <input type="checkbox" id="servicesOnlyModifiable">
+                        Only show services I can change
+                    </label>
+                    <span class="badge badge-neutral" id="servicesCount">…</span>
+                </div>
+
+                <div id="servicesGroups">
+                    <p style="color:var(--text-muted); font-size:0.78rem;">Probing services…</p>
+                </div>
+            </div>
+        </section>
+
         <!-- TAB: ADVANCED TWEAKS -->
         <section id="tab-advanced" class="tab-pane">
             <div class="card">
@@ -771,7 +802,7 @@
                       <span class="badge badge-neutral" id="advCount">…</span>
                   </div>
                   <p style="font-size:0.78rem; color:var(--text-secondary); margin-bottom:12px;">
-                      Only tweaks with a real, measurable performance mechanism are listed here — audited against what is already default on this machine.
+                      Only tweaks with a real, measurable performance mechanism are listed here — audited against what Windows ships as default.
                       Items marked ↻ need a reboot.
                   </p>
                   <div class="adv-legend">
@@ -791,18 +822,18 @@
             </div>
         </section>
 
-        <!-- TAB: GAMING TWEAKS (general performance changers) -->
+        <!-- TAB: GENERAL TWEAKS (everything that is not a performance or network tweak) -->
         <section id="tab-routing" class="tab-pane">
             <div class="card">
                 <div class="card-header">
                     <div class="card-title">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="6 3 20 12 6 21 6 3"/></svg>
-                        Gaming Tweaks
+                        General Tweaks
                     </div>
                     <span class="badge badge-neutral" id="gamingCount">…</span>
                 </div>
                 <p style="font-size:0.78rem; color:var(--text-secondary); margin-bottom:12px;">
-                    The tweaks that actually change how a game performs &mdash; CPU scheduling, GPU behaviour, memory and network path.
+                    Everything that is not a measured performance tweak or a network setting. Privacy, interface, AI, updates and system housekeeping.
                     Every switch reads your live system state first, so ON means the tweak is applied and OFF means stock Windows.
                 </p>
                 <div class="adv-legend">
