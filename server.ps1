@@ -1533,15 +1533,17 @@ function Optimize-Services {
     foreach ($name in $servicesToDisable) {
         $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
         if (-not $svc) { $log += "[SKIP] Service '$name' is not present on this system."; continue }
-        Set-Service -Name $name -StartupType Disabled -ErrorAction SilentlyContinue
-        # Stop-Service is asynchronous: it returns as soon as the stop is requested,
-        # while the service is still StopPending. Reading the state back immediately
-        # therefore catches a service mid-transition and logs a spurious failure, so
-        # wait for the terminal state with a bounded timeout instead of blocking
-        # forever. A service wedged in StopPending can never reach Stopped, so the
-        # timeout is what stops this function hanging.
-        try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
-        $deadline = (Get-Date).AddSeconds(5)
+        # sc.exe rather than Set-/Stop-Service, for the same reason as
+        # Set-ServiceState: the PowerShell cmdlets block until the service reaches
+        # the requested state, so one wedged service hangs this single-threaded
+        # dispatcher and the whole app stops responding. sc.exe hands the request
+        # to the SCM and returns at once.
+        & sc.exe config $name start= disabled 2>$null | Out-Null
+        & sc.exe stop $name 2>$null | Out-Null
+        # Short bounded settle so the read-back below does not catch the service
+        # mid-transition and log a spurious failure. Bounded on purpose: a service
+        # stuck in StopPending never reaches Stopped, and must not hold the loop.
+        $deadline = (Get-Date).AddSeconds(3)
         do {
             $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
             if ($null -eq $svc -or $svc.Status -eq "Stopped") { break }
@@ -1842,32 +1844,32 @@ function Set-ServiceState($name, $optimize) {
     if ($allowed -notcontains $name) {
         return @{ success = $false; error = "Service not manageable: $name" }
     }
+    # Set-Service / Stop-Service / Start-Service BLOCK until the service actually
+    # reaches the requested state. On a service that is slow or wedged that call
+    # never returns, and because this backend dispatches HTTP on a single thread,
+    # one stuck service took down /api/status, /api/services and every other
+    # route - the whole app looked dead. sc.exe config/stop/start hand the request
+    # to the SCM and return immediately, so nothing here can block the listener.
     if ([bool]$optimize) {
-        Set-Service -Name $name -StartupType Disabled -ErrorAction SilentlyContinue
-        try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
-        # Same bounded wait as Optimize-Services:1078-1084. Stop-Service returns while
-        # the service is still StopPending, so an immediate read-back catches it
-        # mid-transition; the deadline is what stops a wedged service hanging this
-        # single-threaded dispatcher forever.
-        $deadline = (Get-Date).AddSeconds(5)
-        do {
-            $probe = Get-Service -Name $name -ErrorAction SilentlyContinue
-            if ($null -eq $probe -or $probe.Status -eq "Stopped") { break }
-            Start-Sleep -Milliseconds 250
-        } while ((Get-Date) -lt $deadline)
+        & sc.exe config $name start= disabled 2>$null | Out-Null
+        & sc.exe stop $name 2>$null | Out-Null
     } else {
         # Restore each service to its true Windows default (not blanket Automatic)
         $defaults = @{
-            "DiagTrack" = "Automatic"; "WerSvc" = "Manual";
-            "lfsvc" = "Manual"; "TrkWks" = "Automatic"; "RemoteRegistry" = "Disabled";
-            "wisvc" = "Manual"; "MapsBroker" = "Automatic"; "WSearch" = "Automatic";
-            "XblGameSave" = "Manual"; "XboxGipSvc" = "Manual"; "XboxNetApiSvc" = "Manual"; "Spooler" = "Automatic";
-            "CDPSvc" = "Manual"; "dmwappushservice" = "Manual"; "PcaSvc" = "Manual"
+            "DiagTrack" = "auto"; "WerSvc" = "demand";
+            "lfsvc" = "demand"; "TrkWks" = "auto"; "RemoteRegistry" = "disabled";
+            "wisvc" = "demand"; "MapsBroker" = "auto"; "WSearch" = "auto";
+            "XblGameSave" = "demand"; "XboxGipSvc" = "demand"; "XboxNetApiSvc" = "demand"; "Spooler" = "auto";
+            "CDPSvc" = "demand"; "dmwappushservice" = "demand"; "PcaSvc" = "demand"
         }
-        $target = if ($defaults.ContainsKey($name)) { $defaults[$name] } else { "Manual" }
-        Set-Service -Name $name -StartupType $target -ErrorAction SilentlyContinue
-        if ($target -ne "Disabled") { Start-Service -Name $name -ErrorAction SilentlyContinue }
+        $target = if ($defaults.ContainsKey($name)) { $defaults[$name] } else { "demand" }
+        & sc.exe config $name start= $target 2>$null | Out-Null
+        if ($target -ne "disabled") { & sc.exe start $name 2>$null | Out-Null }
     }
+    # Short bounded settle so the read-back below catches the SCM update without
+    # ever holding the dispatcher. sc.exe is already non-blocking, so this is just
+    # to let the change land before reporting.
+    Start-Sleep -Milliseconds 400
     # Read back rather than asserting. $ErrorActionPreference is SilentlyContinue at
     # the top of this file, so a failed Set-/Stop-Service is silent - and the previous
     # unconditional `success = $true` reported every outcome as a win, including the

@@ -1,6 +1,6 @@
 {
   "name": "windows-tweaks",
-  "version": "3.1.5",
+  "version": "3.1.6",
   "description": "Ultra-Low Latency & Zero-Bloat Performance Suite for Windows",
   "author": "Windows Tweaks",
   "main": "main.js",
