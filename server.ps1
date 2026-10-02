@@ -974,12 +974,18 @@ $script:RegTweaks = @(
     @{ id="lockAds"; category="System"; label="Disable Lock Screen Ads"; desc="Kills spotlight promos and fun-fact overlays on the lock screen."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"; values=@(@{name="RotatingLockScreenEnabled";type="DWord";on=0;off="__REMOVE__"}, @{name="RotatingLockScreenOverlayEnabled";type="DWord";on=0;off="__REMOVE__"}, @{name="SubscribedContent-338387Enabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="timerResolution"; category="System"; label="Allow Global Timer Resolution Requests"; desc="Lets applications that ask for a high-resolution system timer actually get one, instead of Windows clamping them to the default 15.6ms tick. It does NOT raise the tick on its own - a program has to request it."; path="HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel"; values=@(@{name="GlobalTimerResolutionRequests";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="Corrected after review: the old description claimed this forces a 0.5ms timer period, which is false. GlobalTimerResolutionRequests only PERMITS global requests; without a program asking, the resolution does not change. GAMMA caught this. Do NOT enable on a laptop expecting input latency gains - the effect is workload-dependent and usually small, and permitting high-resolution timers costs a little power." ; perf=$true},
         @{ id="mmcsWin32Priority"; category="Gaming"; label="Processor Allocation: Programs vs Background Services"; desc="Win32PrioritySeparation, the first control in the Windows performance dialog. Programs gives foreground apps a much larger share of quantum than background services, which is what you want when gaming. Real, but it only reweights the legacy scheduler quantum - it does not reorder threads outside MMCSS. Windows reads this under Control\PriorityControl, NOT under Multimedia\SystemProfile, so that is where it is written; an earlier version wrote a copy under SystemProfile that Windows ignored entirely."; path="HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; type="enum"; valueName="Win32PrioritySeparation"; options=@(@{v=38;l="Programs - 0x26 (recommended for gaming)"},@{v=24;l="Background services - 0x18"},@{v=18;l="Short background quantum - 0x12"},@{v="unset";l="Windows default (unset)"}); defaultValue=0; reboot=$true; perf=$true; caution="0x26 is also the Windows default, so this only matters if something moved it. This reweights the legacy scheduler quantum only - modern games run at a higher base priority and largely ignore it." },
-    @{ id="mmcsSystemResponsiveness"; category="Gaming"; label="System Responsiveness for Games"; desc="Clears the 20 percent of CPU that MMCSS holds back for multimedia background work, so a game is preempted less. Choose Off - it is the best setting for gaming. This one is a genuine, well-understood MMCSS control rather than folklore."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; type="enum"; valueName="SystemResponsiveness"; options=@(@{v=0;l="Off (recommended)"},@{v=1;l="On"},@{v="unset";l="Windows default (unset)"}); defaultValue=0; reboot=$true; perf=$true },
+    @{ id="mmcsSystemResponsiveness"; category="Gaming"; label="System Responsiveness for Games"; desc="Clears the 20 percent of CPU that MMCSS holds back for multimedia background work, so a game is preempted less. Choose Off - it is the best setting for gaming. This one is a genuine, well-understood MMCSS control rather than folklore."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; type="enum"; valueName="SystemResponsiveness"; options=@(@{v=0;l="Off (recommended)"},@{v=1;l="On"},@{v="unset";l="Windows default (unset - 20)"}); defaultValue=0; reboot=$true; perf=$true; caution="Removing the reservation lets media threads take CPU the desktop wanted, which can starve the UI if a decode stalls. If audio ever crackles after setting this to Off, put it back to On or Windows default - that is the first thing to revert." },
     @{ id="mmcsCpuPriority"; category="Gaming"; label="CPU Priority for Gaming"; desc="The MMCSS Games task priority, Tasks\Games\Priority. Choose High - 6 on the documented 1 to 8 scale, where 8 is highest. An earlier version wrote a value called Taskscheduler under Multimedia\SystemProfile, which is not a location Windows reads for game scheduling, so it did nothing."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; type="enum"; valueName="Priority"; options=@(@{v=6;l="High - 6 (recommended)"},@{v=8;l="Highest - 8"},@{v=4;l="Medium - 4"},@{v=2;l="Low - 2 (Windows default)"},@{v="unset";l="Windows default (unset)"}); defaultValue=2; reboot=$true; perf=$true; caution="IMPORTANT INTERACTION: this value is ignored entirely while Scheduling Category on this same task is set to High - Microsoft documents that such tasks are always treated as 2. That is the case on a stock machine, so set Scheduling Category above to Medium for this number to take any effect." },
     @{ id="mmcsSchedulingCategory"; category="Gaming"; label="Scheduling Category for Gaming"; desc="Scheduling Category, the MMCSS Games task category. This is NOT a number - it is the text value High, Medium or Low on the Games task. Choose Medium, counterintuitively: Microsoft documents that when Scheduling Category is High the task Priority is always treated as 2, so setting this to High silently cancels out the CPU Priority entry above."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; type="enum"; valueName="Scheduling Category"; valueType="String"; options=@(@{v="Medium";l="Medium (recommended - lets Priority apply)"},@{v="High";l="High - forces Priority to 2"},@{v="Low";l="Low"},@{v="unset";l="Windows default (unset)"}); defaultValue=0; reboot=$true; perf=$true; caution="Text, not a number. Choosing High here undoes the CPU Priority entry: Windows treats any task with a High scheduling category as Priority 2 no matter what Priority says." },
     @{ id="mmcsGpuPriority"; category="Gaming"; label="GPU Priority for Gaming"; desc="The MMCSS Games GPU priority, Tasks\Games\GPU Priority. Choose High - 8 on the documented 0 to 31 scale. An earlier version wrote a value called GPUPriority under Multimedia\SystemProfile, using a signed -2 to 2 scale that Windows does not read; the real value is this one."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; type="enum"; valueName="GPU Priority"; options=@(@{v=8;l="High - 8 (recommended)"},@{v=16;l="Very high - 16"},@{v=4;l="Medium - 4"},@{v=2;l="Low - 2 (Windows default)"},@{v="unset";l="Windows default (unset)"}); defaultValue=2; reboot=$true; perf=$true; caution="Microsoft's public documentation lists this priority as NOT YET USED. That is not the same as unused, though - Microsoft does not document everything, and GPU scheduling is exactly the sort of internal plumbing that gets wired up without appearing in the public docs. No one has measured it either way. What is certain is that it now writes to the correct key with the correct 0 to 31 scale, so it is at least in the right place. Treat it as unverified rather than proven or disproven." },
     @{ id="svcHostSplitThreshold"; category="Gaming"; label="Svchost Split Threshold"; desc="The memory level at which Windows decides whether to split services into separate svchost.exe processes. Choose 4 GB up to 64 GB. Set it at or above your own installed memory and Windows will not split at all, so fewer service groups share a process. Windows reads this under Session Manager\Memory Management, NOT under Multimedia\SystemProfile, so that is where it is written; an earlier version wrote a copy under SystemProfile that Windows ignored entirely."; path="HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"; type="enum"; valueName="SvcHostSplitThreshold"; options=@(@{v=4;l="4 GB"},@{v=8;l="8 GB"},@{v=16;l="16 GB"},@{v=32;l="32 GB"},@{v=64;l="64 GB"},@{v="unset";l="Windows default (unset)"}); defaultValue=0; reboot=$true; perf=$true; caution="A modest reduction in process count, not a headline win. Higher than your RAM means Windows never splits, concentrating services rather than spreading them. This key was never actually set anywhere Windows reads before this fix, so the value you saw in the dropdown previously was not in effect." },
-    @{ id="multimediaScheduling"; category="System"; label="Remove Multimedia Throttle Reservation"; desc="Removes the 20 percent CPU reservation that MMCSS holds back for multimedia work, so audio and video threads are not preempted by background load. Only the one value at its documented location is written - an earlier version also wrote NoLazyMode and GPU Priority under SystemProfile, where they do nothing."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; values=@(@{name="SystemResponsiveness";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Mildly risky on a slow machine - removing the reservation lets media threads take CPU the desktop wanted, which can starve the UI if a decode stalls. If audio ever crackles after enabling, this is the first thing to revert."; advanced=$true ; perf=$true},
+    # REMOVED: id="multimediaScheduling" ("Remove Multimedia Throttle Reservation").
+    # It wrote the same SystemResponsiveness value as the mmcsSystemResponsiveness
+    # enum above, so two controls owned one DWORD and disagreed about its state: the
+    # enum showed "Off (recommended)" while the toggle read the identical 0 as
+    # "not applied", and picking the enum's "Windows default (unset)" silently
+    # flipped the toggle to ON. One value gets one home - the enum, which can
+    # express Off / On / Windows default. Its caution text moved onto the enum.
 @{ id="sysmainMode"; category="System"; label="SysMain Service (Superfetch)"; desc="SysMain, formerly called Superfetch, preloads frequently used applications and files into RAM so they launch faster, and keeps a map of which data is actually in use. On an SSD it gives little or no benefit, because the drive is already fast enough that preloading costs more than it saves, while the service keeps consuming RAM and generating background disk and CPU work. Recommended for SSD users only: disable it. On a mechanical hard drive keep it on Manual, which still prefetches on demand without the constant background scanning."; path="HKLM:\SYSTEM\CurrentControlSet\Services\SysMain"; type="enum"; valueName="Start"; options=@(@{v=4;l="Disabled (Recommended for SSD)"},@{v=3;l="Manual - only on demand"},@{v=2;l="Automatic - constant prefetch"}); defaultValue=2; reboot=$false; perf=$true; advanced=$true; caution="Recommended for SSD users only. On a mechanical hard drive, switching this from Automatic to Disabled will noticeably slow cold application launches, because keeping recently used data in RAM is the entire job of this service. Start type values follow the documented Windows scheme: 0 Boot, 1 System, 2 Automatic, 3 Manual, 4 Disabled. The change applies the next time the service is started; SysMain is currently stopped, so no reboot is needed. MOVED here from the Debloater so it has exactly one home - the old services-tab toggle for SysMain has been removed to avoid two controls fighting over the same value." },
 @{ id="mpoOff"; category="System"; label="Disable Multi-Plane Overlay (MPO)"; desc="Windows composites multiple display layers in hardware using the GPU. On multi-monitor setups, hybrid laptops and some driver/GPU combinations this causes flickering, black screens on alt-tab, and stuttering. Disabling MPO makes the desktop compositor draw in the classic way. This is a display workaround, not a speed tweak - leave it off unless you are actually seeing flicker or black screens."; path="HKLM:\SOFTWARE\Microsoft\Windows\Dwm"; values=@(@{name="OverlayTestMode";type="DWord";on=5;off="__REMOVE__"}); defaultOn=$false; reboot=$true; perf=$true; advanced=$true; verify=$true; caution="Read this before enabling. OverlayTestMode is NOT documented by Microsoft - it appears in no ADMX on this build and has no Microsoft Learn page - and the value 5 meaning 'MPO off' is community consensus, not an official enumeration. Two paths circulate for it; this writes the SOFTWARE\Microsoft\Windows\Dwm one, because that is the key DWM actually reads on this machine and the Control\Dwm variant does not exist here. It is already set to 5 on this PC, so this toggle will read ON from the start. A reboot is required. If you see no change, that is expected on some 24H2 and newer builds where DWM appears to ignore these flags." },
 @{ id="servicesTimeout"; category="System"; label="Optimize Background Services"; desc="Shortens the Service Control Manager timeout for services that are starting during boot, from 60 seconds to 30. A service that is slow to start can stall the boot sequence behind it, so a shorter ceiling means Windows stops waiting on a hung service and carries on bringing up the rest of the system. This can speed up boot time slightly."; path="HKLM:\SYSTEM\CurrentControlSet\Control"; values=@(@{name="ServicesTimeout";type="DWord";on=30;off="__REMOVE__"}); defaultOn=$false; reboot=$true; perf=$true; advanced=$true; verify=$true; caution="Honest caveat before you enable: ServicesTimeout is undocumented - no ADMX on this build, no Microsoft Learn page - although services.exe does read it. The value is in SECONDS, so 30 is 30 seconds; 30000 would mean 8 hours 20 minutes. The nearby, genuinely documented value is ServicesPipeTimeout (also under Control, but in MILLISECONDS), and on this PC it is already at 30000, which is 30 seconds, the documented default. So the documented timeout is already at the number this tweak is aiming for, and you may measure no difference. A reboot is required for either to take effect." },
@@ -1844,28 +1850,29 @@ function Set-ServiceState($name, $optimize) {
     if ($allowed -notcontains $name) {
         return @{ success = $false; error = "Service not manageable: $name" }
     }
+    # Each service restores to its true Windows default, not a blanket Automatic.
+    $defaults = @{
+        "DiagTrack" = "auto"; "WerSvc" = "demand";
+        "lfsvc" = "demand"; "TrkWks" = "auto"; "RemoteRegistry" = "disabled";
+        "wisvc" = "demand"; "MapsBroker" = "auto"; "WSearch" = "auto";
+        "XblGameSave" = "demand"; "XboxGipSvc" = "demand"; "XboxNetApiSvc" = "demand"; "Spooler" = "auto";
+        "CDPSvc" = "demand"; "dmwappushservice" = "demand"; "PcaSvc" = "demand"
+    }
+    $scTarget = if ($defaults.ContainsKey($name)) { $defaults[$name] } else { "demand" }
+    # sc.exe spells these differently from the PowerShell enum, so keep both forms:
+    # $scTarget is what we ask sc.exe for, $wantStart is what Get-Service will report.
+    $wantStart = switch ($scTarget) { "auto" { "Automatic" } "demand" { "Manual" } default { $scTarget } }
+    if ([bool]$optimize) { $wantStart = "Disabled"; $scTarget = "disabled" }
+
     # Set-Service / Stop-Service / Start-Service BLOCK until the service actually
     # reaches the requested state. On a service that is slow or wedged that call
     # never returns, and because this backend dispatches HTTP on a single thread,
     # one stuck service took down /api/status, /api/services and every other
     # route - the whole app looked dead. sc.exe config/stop/start hand the request
     # to the SCM and return immediately, so nothing here can block the listener.
-    if ([bool]$optimize) {
-        & sc.exe config $name start= disabled 2>$null | Out-Null
-        & sc.exe stop $name 2>$null | Out-Null
-    } else {
-        # Restore each service to its true Windows default (not blanket Automatic)
-        $defaults = @{
-            "DiagTrack" = "auto"; "WerSvc" = "demand";
-            "lfsvc" = "demand"; "TrkWks" = "auto"; "RemoteRegistry" = "disabled";
-            "wisvc" = "demand"; "MapsBroker" = "auto"; "WSearch" = "auto";
-            "XblGameSave" = "demand"; "XboxGipSvc" = "demand"; "XboxNetApiSvc" = "demand"; "Spooler" = "auto";
-            "CDPSvc" = "demand"; "dmwappushservice" = "demand"; "PcaSvc" = "demand"
-        }
-        $target = if ($defaults.ContainsKey($name)) { $defaults[$name] } else { "demand" }
-        & sc.exe config $name start= $target 2>$null | Out-Null
-        if ($target -ne "disabled") { & sc.exe start $name 2>$null | Out-Null }
-    }
+    & sc.exe config $name start= $scTarget 2>$null | Out-Null
+    if ([bool]$optimize) { & sc.exe stop $name 2>$null | Out-Null }
+    elseif ($scTarget -ne "disabled") { & sc.exe start $name 2>$null | Out-Null }
     # Short bounded settle so the read-back below catches the SCM update without
     # ever holding the dispatcher. sc.exe is already non-blocking, so this is just
     # to let the change land before reporting.
@@ -1878,6 +1885,18 @@ function Set-ServiceState($name, $optimize) {
     $after = Get-Service -Name $name -ErrorAction SilentlyContinue
     if ($null -eq $after) {
         return @{ success = $false; error = "Service '$name' not found after change."; name = $name }
+    }
+    # Verify the change actually landed instead of just asserting success. The old
+    # check only proved the service still EXISTS, so a silent failure - most often
+    # sc.exe being denied because the process is not elevated - was reported to the
+    # UI as a completed change. Start type is the value this function sets, so
+    # that is what gets compared.
+    if ("$($after.StartType)" -ne $wantStart) {
+        return @{
+            success = $false
+            name = $name
+            error = "Start type is '$($after.StartType)', expected '$wantStart'. The Service Control Manager refused the change - this normally means the app is not running as Administrator."
+        }
     }
     return @{ success = $true; name = $name; optimized = [bool]$optimize; status = "$($after.Status)"; startType = "$($after.StartType)" }
 }
@@ -2292,6 +2311,17 @@ Write-Host "==================================================================" 
 Write-Host " Server running at: http://127.0.0.1:$Port/" -ForegroundColor Green
 Write-Host " Admin Elevated: $script:IsAdmin" -ForegroundColor Yellow
 
+# -----------------------------------------------------------------------------
+# PER-PROCESS API TOKEN
+# -----------------------------------------------------------------------------
+# Printed on a marker line so main.js can lift it off stdout and hand it to the
+# renderer. Cryptographically random (not Get-Random, which is not a CSPRNG).
+# Regenerated every launch, so it cannot be replayed across restarts.
+$tokenBytes = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($tokenBytes)
+$script:ApiToken = [Convert]::ToBase64String($tokenBytes)
+Write-Host "__WT_TOKEN__$script:ApiToken"
+
 # Launch Brave in Native App Mode if available, or default browser
 if (-not $NoBrowser) {
     $bravePath = "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
@@ -2328,16 +2358,68 @@ while ($listener.IsListening) {
         $request = $context.Request
         $response = $context.Response
 
-        # CORS Headers
-        $response.AddHeader("Access-Control-Allow-Origin", "*")
-        $response.AddHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        $response.AddHeader("Access-Control-Allow-Headers", "Content-Type")
+        # ---------------------------------------------------------------------------
+        # AUTHENTICATION GATE
+        # ---------------------------------------------------------------------------
+        # This used to answer every request with "Access-Control-Allow-Origin: *".
+        # The listener binds 127.0.0.1, but CORS is enforced by the BROWSER, not by
+        # the socket: any web page the user visits could POST to this port, flip
+        # registry values and disable services, then read the reply back. Verified
+        # live - a request with Origin: https://evil.example.com changed TaskbarSi
+        # and returned {"success":true}.
+        #
+        # Two layers now:
+        #   1. Origin allowlist. The renderer is a file:// page, so it legitimately
+        #      sends "Origin: null"; a real hostile page sends its own origin. Also
+        #      accepted: loopback, for manual curl testing.
+        #   2. A per-process random token in X-WT-Token. The browser cannot make
+        #      another origin send a header the attacker chooses, and the token only
+        #      exists in this process's stdout and in the Electron renderer, so a web
+        #      page cannot learn it.
+        $origin = $request.Headers["Origin"]
+        $originOk = (
+            [string]::IsNullOrWhiteSpace($origin) -or
+            $origin -eq "null" -or
+            $origin -match '^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$'
+        )
+
+        if (-not $originOk) {
+            $response.StatusCode = 403
+            $buf = [Text.Encoding]::UTF8.GetBytes('{"success":false,"error":"Origin not allowed."}')
+            $response.ContentType = "application/json"
+            $response.ContentLength64 = $buf.Length
+            $response.OutputStream.Write($buf, 0, $buf.Length)
+            $response.Close()
+            continue
+        }
 
         if ($request.HttpMethod -eq "OPTIONS") {
+            # Preflight carries no custom headers, so it cannot present the token.
+            # The origin allowlist above is the only check available here; the token
+            # is enforced on the real request that follows.
+            $response.AddHeader("Access-Control-Allow-Origin", $(if ($origin -eq "null") { "null" } else { $origin }))
+            $response.AddHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            $response.AddHeader("Access-Control-Allow-Headers", "Content-Type, X-WT-Token")
+            $response.AddHeader("Access-Control-Max-Age", "600")
             $response.StatusCode = 200
             $response.Close()
             continue
         }
+
+        $supplied = $request.Headers["X-WT-Token"]
+        if (-not $script:ApiToken -or $supplied -ne $script:ApiToken) {
+            $response.StatusCode = 403
+            $buf = [Text.Encoding]::UTF8.GetBytes('{"success":false,"error":"Missing or invalid API token. This endpoint only answers the desktop app."}')
+            $response.ContentType = "application/json"
+            $response.ContentLength64 = $buf.Length
+            $response.OutputStream.Write($buf, 0, $buf.Length)
+            $response.Close()
+            continue
+        }
+
+        # Only now, once the caller is authenticated, permit the read.
+        $response.AddHeader("Access-Control-Allow-Origin", $(if ($origin -eq "null") { "null" } else { $origin }))
+        $response.AddHeader("Vary", "Origin")
 
         $rawUrl = $request.RawUrl.Split('?')[0]
 
@@ -2462,19 +2544,34 @@ while ($listener.IsListening) {
                         } elseif (-not $gdef.Modifiable) {
                             $jsonOutput = @{ success = $false; error = "Group '$gid' is read-only and has no bulk action" }
                         } else {
-                            $members = @(Get-BloatServices | Where-Object { $_.group -eq $gid -and $_.curated })
-                            $done = @(); $failed = @()
-                            foreach ($m in $members) {
-                                $r = Set-ServiceState -name $m.name -optimize ([bool]$parsed.optimized)
-                                if ($r.success) { $done += $m.name } else { $failed += $m.name }
-                            }
-                            $jsonOutput = @{
-                                success = ($failed.Count -eq 0)
-                                group = $gid
-                                optimized = [bool]$parsed.optimized
-                                changed = $done.Count
-                                failed = $failed
-                                names = $done
+                            # The client sends "optimize"; this used to read
+                            # $parsed.optimized, which is always $null, and
+                            # [bool]$null is $false. So every "Disable all" in the
+                            # UI silently performed a RESTORE instead - the exact
+                            # opposite of the button, while still reporting
+                            # success and "N services disabled". Accept either
+                            # spelling, and never let a missing value default to
+                            # false and quietly invert the action.
+                            $wantDisable = $null
+                            if ($parsed.PSObject.Properties.Name -contains "optimize") { $wantDisable = [bool]$parsed.optimize }
+                            elseif ($parsed.PSObject.Properties.Name -contains "optimized") { $wantDisable = [bool]$parsed.optimized }
+                            if ($null -eq $wantDisable) {
+                                $jsonOutput = @{ success = $false; error = "Missing 'optimize' flag - refusing to guess, because guessing false means RESTORE." }
+                            } else {
+                                $members = @(Get-BloatServices | Where-Object { $_.group -eq $gid -and $_.curated })
+                                $done = @(); $failed = @()
+                                foreach ($m in $members) {
+                                    $r = Set-ServiceState -name $m.name -optimize $wantDisable
+                                    if ($r.success) { $done += $m.name } else { $failed += "$($m.name): $($r.error)" }
+                                }
+                                $jsonOutput = @{
+                                    success = ($failed.Count -eq 0)
+                                    group = $gid
+                                    optimized = (-not $wantDisable)
+                                    changed = $done.Count
+                                    failed = $failed
+                                    names = $done
+                                }
                             }
                         }
                     }

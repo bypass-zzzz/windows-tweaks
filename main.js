@@ -12,6 +12,9 @@ let updateCheckedOnce = false;
 let mainWindow = null;
 let splashWindow = null;
 let psServer = null;
+// Set from the backend's stdout marker line; gates every HTTP call from the renderer.
+let apiToken = '';
+let stdoutCarry = '';
 let backendReady = false;
 const PORT = 48921;
 const FALLBACK_PORT = 48922;
@@ -198,7 +201,16 @@ function startBackend(onProgress, onReady) {
         onProgress(16, COOL_LINES[1]);
 
         psServer.stdout.on('data', (data) => {
-            console.log('[PS Backend]', data.toString().trim());
+            const text = data.toString();
+            console.log('[PS Backend]', text.trim());
+            // The backend prints its per-process API token on a marker line. Lift it
+            // off stdout here so the renderer can authenticate; without it every
+            // request is refused. A chunk can split the marker across reads, so keep
+            // a small carry buffer instead of assuming one marker per chunk.
+            const carry = (stdoutCarry + text).slice(-512);
+            stdoutCarry = '';
+            const m = carry.match(/__WT_TOKEN__([A-Za-z0-9+/=]{10,})/);
+            if (m) apiToken = m[1];
         });
 
         psServer.stderr.on('data', (data) => {
@@ -365,6 +377,15 @@ ipcMain.handle('get-is-admin', async () => {
 });
 
 ipcMain.handle('get-port', () => PORT);
+// Per-process API token, read off the backend's stdout. Polls briefly because the
+// renderer can ask before the marker line arrives; the backend prints it before the
+// listener serves anything, so this resolves on the first or second tick.
+ipcMain.handle('get-api-token', async () => {
+    for (let i = 0; i < 60 && !apiToken; i++) {
+        await new Promise(r => setTimeout(r, 100));
+    }
+    return apiToken;
+});
 ipcMain.on('open-external', (event, url) => shell.openExternal(url));
 ipcMain.on('check-updates', () => checkForUpdates(true));
 

@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     maximize: () => ipcRenderer.send('window-maximize'),
     close: () => ipcRenderer.send('window-close'),
     getPort: () => ipcRenderer.invoke('get-port'),
+    getApiToken: () => ipcRenderer.invoke('get-api-token'),
     isAdmin: () => ipcRenderer.invoke('get-is-admin'),
     openExternal: (url) => ipcRenderer.send('open-external', url),
     checkUpdates: () => ipcRenderer.send('check-updates'),

@@ -7,6 +7,40 @@
 // probe the real backend instead (packaged port, page origin, fallbacks).
 let API_BASE = 'http://127.0.0.1:48921';
 
+// -----------------------------------------------------------------------------
+// API TOKEN
+// -----------------------------------------------------------------------------
+// The backend used to serve "Access-Control-Allow-Origin: *" on every route, so
+// any web page could POST to 127.0.0.1:48921 and change system settings. It now
+// requires a per-process token in X-WT-Token, which only this renderer can obtain
+// (via preload, from the backend's stdout). Wrapping window.fetch once covers
+// every call site in this file — there are dozens, and missing one would have been
+// a silent 403 rather than an obvious break.
+let API_TOKEN = '';
+
+async function fetchApiToken() {
+    try {
+        if (window.electronAPI && window.electronAPI.getApiToken) {
+            API_TOKEN = (await window.electronAPI.getApiToken()) || '';
+        }
+    } catch (_) { API_TOKEN = ''; }
+}
+
+(function installTokenFetch() {
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+        let url = (typeof input === 'string') ? input : (input && input.url) || '';
+        if (API_TOKEN && /^https?:\/\/127\.0\.0\.1:\d+\//i.test(url)) {
+            const opts = init || (typeof input === 'object' && input ? { ...input } : {});
+            const headers = new Headers((opts.headers) || (typeof input === 'object' && input ? input.headers : undefined));
+            headers.set('X-WT-Token', API_TOKEN);
+            opts.headers = headers;
+            return nativeFetch(url, opts);
+        }
+        return nativeFetch(input, init);
+    };
+})();
+
 async function probeBase(url) {
     try {
         const ctrl = new AbortController();
@@ -18,6 +52,8 @@ async function probeBase(url) {
 }
 
 async function initApiBase() {
+    // Token first: probeBase hits /api/status, which now demands it.
+    await fetchApiToken();
     const candidates = [];
     try {
         if (window.electronAPI && window.electronAPI.getPort) {
@@ -538,13 +574,18 @@ async function setEnumTweak(id, value) {
     // would hide the very distinction the sentinel exists to make.
     const numeric = Number(value);
     const payloadValue = (!isNaN(numeric) && String(value).trim() !== "") ? numeric : String(value);
+    // Declared out here, not inside the try. `const data` inside the block made the
+    // reconcile below - which runs after the try - throw "data is not defined" on
+    // EVERY successful change, so the dropdown snapped back and logged an unhandled
+    // rejection even though the registry write had already landed.
+    let data = null;
     try {
         const res = await fetch(`${API_BASE}/api/tweak/set`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ id, value: payloadValue })
         });
-        const data = await res.json();
+        data = await res.json();
         if (data.success) {
             appendLog(`[OK] ${name} set to ${chosen}.${data.reboot ? " Reboot recommended." : ""}`);
             showToast(`${name}: ${chosen}`, "success");
@@ -1345,9 +1386,16 @@ async function applyNetworkTweaks() {
             data.logs.forEach(l => appendLog(l, "ok"));
             showToast("Network Stack Tuned for Lowest Latency!", "success");
             fetchNetworkStatus();
+        } else {
+            // Previously silent: the "if" had no else, so a failure left the user
+            // staring at the original "Applying..." toast that never resolved.
+            const why = data.error || "backend reported no result";
+            appendLog(`[ERR] Network tweaks failed: ${why}`, "err");
+            showToast(`Network tweaks failed: ${why}`, "error");
         }
     } catch (e) {
         appendLog(`[ERR] Network tweaks failed: ${e.message}`, "err");
+        showToast(`Network tweaks failed: ${e.message}`, "error");
     }
 }
 
@@ -1360,9 +1408,14 @@ async function applySystemTweaks() {
             data.logs.forEach(l => appendLog(l, "ok"));
             showToast("Kernel & Timers Tuned! (Restart recommended)", "success");
             fetchSystemStatus();
+        } else {
+            const why = data.error || "backend reported no result";
+            appendLog(`[ERR] System tweaks failed: ${why}`, "err");
+            showToast(`System tweaks failed: ${why}`, "error");
         }
     } catch (e) {
         appendLog(`[ERR] System tweaks failed: ${e.message}`, "err");
+        showToast(`System tweaks failed: ${e.message}`, "error");
     }
 }
 
@@ -1471,7 +1524,16 @@ function renderServiceGroups() {
     if (countEl) countEl.textContent = `${shown} of ${cachedServices.length}`;
 }
 
+// Set of group ids with a bulk request in flight. Without it the two buttons stay
+// enabled while the POST is outstanding, so a double-click fires the same bulk
+// change twice - which for a restore means restoring over a disable.
+const bulkInFlight = new Set();
+
 async function bulkServiceGroup(groupId, restore) {
+    if (bulkInFlight.has(groupId)) return;
+    bulkInFlight.add(groupId);
+    const btns = [...document.querySelectorAll(`[data-group-bulk="${groupId}"]`)];
+    btns.forEach(b => { b.disabled = true; });
     const g = cachedServices.find(s => s.group === groupId);
     const title = g ? g.groupTitle : groupId;
     showToast(restore ? `Restoring ${title}…` : `Disabling ${title}…`, "info");
@@ -1486,11 +1548,21 @@ async function bulkServiceGroup(groupId, restore) {
             appendLog(`[OK] ${title}: ${data.changed} service(s) ${restore ? "restored" : "disabled"}.`, "ok");
             showToast(`${data.changed} service(s) ${restore ? "restored" : "disabled"}`, "success");
         } else {
-            appendLog(`[ERR] ${title}: ${data.error || "failed"}`, "err");
-            showToast(data.error || "Bulk change failed", "error");
+            // The server reports per-service failures as strings in `failed`, not as a
+            // single `error` field, so falling back to data.error alone showed
+            // "Bulk change failed" and hid the reason - which is the one thing worth
+            // showing when the Service Control Manager refuses a change.
+            const why = data.error
+                || (Array.isArray(data.failed) && data.failed.length ? data.failed.join("; ") : "unknown error");
+            appendLog(`[ERR] ${title}: ${why}`, "err");
+            showToast(`${title}: ${why}`, "error");
         }
     } catch (e) {
+        appendLog(`[ERR] ${title}: ${e.message}`, "err");
         showToast(`Bulk change failed: ${e.message}`, "error");
+    } finally {
+        bulkInFlight.delete(groupId);
+        btns.forEach(b => { b.disabled = false; });
     }
     fetchServices();
 }
