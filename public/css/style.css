@@ -117,7 +117,7 @@ body {
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    padding: 16px 168px 16px 28px; /* right clearance for the frameless win-controls */
+    padding: 12px 168px 12px 28px; /* right clearance for the frameless win-controls */
     background: rgba(10, 10, 12, 0.6);
     backdrop-filter: blur(30px) saturate(180%);
     -webkit-backdrop-filter: blur(30px) saturate(180%);
@@ -380,7 +380,7 @@ body {
     backdrop-filter: blur(30px) saturate(180%);
     -webkit-backdrop-filter: blur(30px) saturate(180%);
     border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-lg);
+    border-radius: 24px;
     padding: 20px;
     box-shadow: var(--shadow-card);
     display: flex;
@@ -594,7 +594,7 @@ body {
     padding: 14px 16px;
     background: rgba(255, 255, 255, 0.04);
     border: 1px solid var(--border-subtle);
-    border-radius: 16px;
+    border-radius: 14px;
     transition: background 0.25s, border-color 0.25s;
 }
 

@@ -632,9 +632,22 @@ function tweakName(id) {
 
 async function setTweak(id, enabled) {
     const name = tweakName(id);
-    showToast(enabled ? `Applying: ${name}...` : `Restoring default: ${name}...`, "info");
-    appendLog(`[TWEAK] ${name} → ${enabled ? 'APPLYING' : 'RESTORING WINDOWS DEFAULT'}...`);
-    lastCatalog[id] = !!enabled; // optimistic — corrected by refetch below
+    showToast(enabled ? `Applying: ${name}` : `Restoring default: ${name}`, "info");
+    appendLog(`[TWEAK] ${name} \u2192 ${enabled ? 'APPLYING' : 'RESTORING WINDOWS DEFAULT'}...`);
+    // Optimistic update so the switch doesn't flicker back
+    const TWEAK_MAP = {
+        hags: 'hags', gameOpt: 'gameOptimizations', dynamicTick: 'dynamicTickDisabled',
+        platformTick: 'platformTick', kernelRamLock: 'kernelRamLock',
+        netThrottle: 'networkThrottlingDisabled', gameDvr: 'gameDvrDisabled',
+        deliveryOpt: 'deliveryOptimizationDisabled', powerPlan: 'ultimatePowerPlan',
+        gameMode: 'gameMode', transparency: 'transparencyOff', menuDelay: 'menuFast',
+        mousePrecision: 'precisionOff', memCompression: 'memDecompressed',
+        cpuBoost: 'cpuBoost', nvidiaRid: 'nvidiaRid', hibernate: 'hibernate',
+        netbios: 'netbios', teredo: 'teredo', isatap: 'isatap', sixtofour: 'sixtofour'
+    };
+    lastCatalog[id] = !!enabled;
+    if (lastTweaks && TWEAK_MAP[id]) lastTweaks[TWEAK_MAP[id]] = !!enabled;
+    syncSwitches();
     try {
         const res = await fetch(`${API_BASE}/api/tweak/set`, {
             method: "POST",
@@ -644,21 +657,25 @@ async function setTweak(id, enabled) {
         const data = await res.json();
         if (data.success) {
             appendLog(`[OK] ${name} ${enabled ? 'applied' : 'restored to Windows default'}.${data.reboot ? ' Reboot recommended.' : ''}`, "ok");
-            showToast(enabled ? `Applied: ${name}${data.reboot ? ' (reboot recommended)' : ''}` : `Restored: ${name}`, "success");
-            fetchSystemStatus();
-            fetchNetworkStatus();
-            fetchCatalog();
+            showToast(enabled ? `Applied: ${name}${data.reboot ? ' (reboot)' : ''}` : `Restored: ${name}`, "success");
+            if (id === 'hags' && lastTweaks) updateBadge('badgeHagsOverall', enabled, 'HAGS Active', 'HAGS Off');
         } else {
             appendLog(`[ERR] ${data.error || 'tweak failed'}`, "err");
             showToast(data.error || "Tweak failed", "error");
+            // Revert optimistic update
+            lastCatalog[id] = !enabled;
+            if (lastTweaks && TWEAK_MAP[id]) lastTweaks[TWEAK_MAP[id]] = !enabled;
+            syncSwitches();
             fetchSystemStatus();
-            fetchNetworkStatus();
             fetchCatalog();
         }
     } catch (e) {
         appendLog(`[ERR] Tweak ${id} failed: ${e.message}`, "err");
+        showToast(`Tweak failed: ${e.message}`, "error");
+        lastCatalog[id] = !enabled;
+        if (lastTweaks && TWEAK_MAP[id]) lastTweaks[TWEAK_MAP[id]] = !enabled;
+        syncSwitches();
         fetchSystemStatus();
-        fetchNetworkStatus();
         fetchCatalog();
     }
 }
@@ -1656,6 +1673,12 @@ async function disableAllTasks() {
     }
 }
 
+const PROTECTED_PROCESSES = new Set([
+    'lsass.exe', 'csrss.exe', 'winlogon.exe', 'services.exe', 'smss.exe',
+    'wininit.exe', 'System', 'Registry', 'Idle', 'MemCompression',
+    'SecurityHealthService.exe', 'MsMpEng.exe', 'dwm.exe', 'svchost.exe'
+]);
+
 async function fetchProcesses() {
     try {
         const res = await fetch(`${API_BASE}/api/processes`);
@@ -1665,21 +1688,24 @@ async function fetchProcesses() {
         const tbody = document.getElementById("processTableBody");
         if (!tbody) return;
 
-        tbody.innerHTML = list.map(p => `
-            <tr>
+        tbody.innerHTML = list.map(p => {
+            const isProtected = PROTECTED_PROCESSES.has(p.name);
+            const categoryBadge = isProtected
+                ? `<span class="badge badge-danger">SYSTEM PROCESS</span>`
+                : p.isBloat
+                    ? `<span class="badge badge-warning">BACKGROUND BLOAT</span>`
+                    : `<span class="badge badge-neutral">ACTIVE APP</span>`;
+            const actionCell = isProtected
+                ? `<span class="badge badge-neutral" title="System process — cannot be terminated safely">\uD83D\uDD12 Protected</span>`
+                : `<button class="btn btn-danger btn-sm" style="padding:2px 8px; font-size:0.68rem;" onclick="killProcess(${p.id}, '${p.name}')">End Task</button>`;
+            return `<tr>
                 <td><strong>${p.name}</strong></td>
                 <td style="font-family:var(--font-mono);">${p.id}</td>
                 <td style="font-family:var(--font-mono);">${p.memoryMB} MB</td>
-                <td>
-                    <span class="badge ${p.isBloat ? 'badge-warning' : 'badge-neutral'}">
-                        ${p.isBloat ? 'BACKGROUND BLOAT' : 'ACTIVE APP'}
-                    </span>
-                </td>
-                <td>
-                    <button class="btn btn-danger btn-sm" style="padding:2px 8px; font-size:0.68rem;" onclick="killProcess(${p.id}, '${p.name}')">End Task</button>
-                </td>
-            </tr>
-        `).join("");
+                <td>${categoryBadge}</td>
+                <td>${actionCell}</td>
+            </tr>`;
+        }).join("");
     } catch (e) {
         console.error("fetchProcesses error", e);
     }
