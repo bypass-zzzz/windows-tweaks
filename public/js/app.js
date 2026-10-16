@@ -566,7 +566,20 @@ function tweakState(id) {
 const UNSET = "unset";
 function enumControlHtml(t) {
     const cur = (t.value === null || t.value === undefined) ? UNSET : String(t.value);
-    const opts = (t.options || []).map(o =>
+    const list = t.options || [];
+    // A <select> with no matching option renders its FIRST option as selected, so a
+    // registry value that is not one of the presets was displayed as though it were
+    // the first preset. System Responsiveness is the live case: Windows ships 10 on
+    // x64, the presets are Off (0) / On (1) / unset, so the row read "Off
+    // (recommended)" while the registry held 10. The app can only ever write a
+    // preset, so a non-preset value is Windows' own and saying so is the honest
+    // thing - it is also the difference between "did my choice apply?" and a wrong
+    // answer either way.
+    const matches = list.some(o => String(o.v) === cur);
+    const extra = matches ? "" : (cur === UNSET
+        ? `<option value="" selected disabled>No value set (Windows default)</option>`
+        : `<option value="${escapeHtml(cur)}" selected>Windows value: ${escapeHtml(cur)} - not a preset</option>`);
+    const opts = extra + list.map(o =>
         `<option value="${escapeHtml(o.v)}"${String(o.v) === cur ? " selected" : ""}>${escapeHtml(o.l)}</option>`
     ).join("");
 
