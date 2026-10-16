@@ -645,8 +645,16 @@ async function setTweak(id, enabled) {
         cpuBoost: 'cpuBoost', nvidiaRid: 'nvidiaRid', hibernate: 'hibernate',
         netbios: 'netbios', teredo: 'teredo', isatap: 'isatap', sixtofour: 'sixtofour'
     };
+    const TCP_MAP = {
+        tcpNoDelay: 'tcpNoDelay',
+        tcpAckFreq: 'tcpAckFrequency',
+        rss: 'rss',
+        qosLimit: 'qosLimit',
+        tcpPorts: 'tcpPorts'
+    };
     lastCatalog[id] = !!enabled;
     if (lastTweaks && TWEAK_MAP[id]) lastTweaks[TWEAK_MAP[id]] = !!enabled;
+    if (lastTcp && TCP_MAP[id]) lastTcp[TCP_MAP[id]] = !!enabled;
     syncSwitches();
     try {
         const res = await fetch(`${API_BASE}/api/tweak/set`, {
@@ -665,6 +673,7 @@ async function setTweak(id, enabled) {
             // Revert optimistic update
             lastCatalog[id] = !enabled;
             if (lastTweaks && TWEAK_MAP[id]) lastTweaks[TWEAK_MAP[id]] = !enabled;
+            if (lastTcp && TCP_MAP[id]) lastTcp[TCP_MAP[id]] = !enabled;
             syncSwitches();
             fetchSystemStatus();
             fetchCatalog();
@@ -674,6 +683,7 @@ async function setTweak(id, enabled) {
         showToast(`Tweak failed: ${e.message}`, "error");
         lastCatalog[id] = !enabled;
         if (lastTweaks && TWEAK_MAP[id]) lastTweaks[TWEAK_MAP[id]] = !enabled;
+        if (lastTcp && TCP_MAP[id]) lastTcp[TCP_MAP[id]] = !enabled;
         syncSwitches();
         fetchSystemStatus();
         fetchCatalog();

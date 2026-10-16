@@ -250,8 +250,15 @@ function pollBackend(onProgress, onReady) {
         const pct = Math.round(18 + (attempts / MAX_ATTEMPTS) * 66);
         onProgress(pct, COOL_LINES[attempts % COOL_LINES.length]);
 
-        http.get(`http://127.0.0.1:${PORT}/api/status`, (res) => {
-            if (res.statusCode === 200) {
+        const reqOpts = {
+            hostname: '127.0.0.1',
+            port: PORT,
+            path: '/api/status',
+            headers: apiToken ? { 'X-WT-Token': apiToken } : {}
+        };
+        http.get(reqOpts, (res) => {
+            // 200 (authenticated) or 403 (server listening but token checked later) means backend is up
+            if (res.statusCode === 200 || res.statusCode === 403) {
                 res.resume(); // drain
                 clearInterval(poll);
                 backendReady = true;
