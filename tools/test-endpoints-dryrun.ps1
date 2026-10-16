@@ -47,10 +47,14 @@ param(
     [int]$Port = 48933,
     [int]$StartupTimeoutSec = 60,
     # The bulk routes are not slow because of the dry run, they are slow in
-    # general: /api/revert-defaults walks all 56 catalog tweaks plus netsh /
-    # powercfg / bcdedit / MMAgent / service calls, and every one of those still
-    # performs its readback even when the mutation itself is intercepted. At 90 s
-    # it timed out with the block log already showing 123 intercepted calls.
+    # general: /api/revert-defaults walks every catalog entry (93, the seven
+    # dropdowns included) plus netsh / powercfg / bcdedit / MMAgent / service
+    # calls, and every one of those still performs its readback even when the
+    # mutation itself is intercepted. At 90 s it used to time out with the block
+    # log already showing 123 intercepted calls - while an unrelated bug in
+    # Set-RegTweak's handling of the dropdowns was stalling the whole route. That
+    # is fixed, and this route now measures 0.2 s; the caps below are kept
+    # generous so a slow machine cannot turn a slow run into a false failure.
     [int]$RequestTimeoutSec = 180,
     [switch]$SkipBulk
 )
