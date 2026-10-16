@@ -58,28 +58,23 @@ function isAdminSync() {
 }
 
 function relaunchAsAdmin() {
-    let exe = process.execPath;
-    let args = '';
-    if (app.isPackaged) {
-        args = '';
-    } else {
-        try {
-            exe = require('electron');
-            args = `"${app.getAppPath()}"`;
-        } catch (_) {
-            exe = process.execPath;
-            args = `"${app.getAppPath()}"`;
-        }
-    }
+    // Always use process.execPath — require('electron') inside Electron's main
+    // process returns the API namespace object, not a file path, so it would
+    // produce Start-Process "[object Object]" which silently fails.
+    const exe = process.execPath;
+    const args = app.isPackaged ? '' : `"${app.getAppPath()}"`;
     const cmd = args
         ? `Start-Process -FilePath "${exe}" -ArgumentList '${args}' -Verb RunAs`
         : `Start-Process -FilePath "${exe}" -Verb RunAs`;
+    // Release the single-instance lock before spawning the elevated process,
+    // otherwise Process 2 (admin) can't acquire the lock and immediately quits.
+    app.releaseSingleInstanceLock();
     try {
-        require('child_process').spawnSync(
-            'powershell.exe',
+        // Use async spawn so Process 1 can exit immediately after handing off.
+        spawn('powershell.exe',
             ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd],
-            { windowsHide: true, stdio: 'ignore' }
-        );
+            { windowsHide: true, stdio: 'ignore', detached: true }
+        ).unref();
     } catch (_) {}
 }
 
@@ -218,11 +213,11 @@ function startBackend(onProgress, onReady) {
             // The backend prints its per-process API token on a marker line. Lift it
             // off stdout here so the renderer can authenticate; without it every
             // request is refused. A chunk can split the marker across reads, so keep
-            // a small carry buffer instead of assuming one marker per chunk.
-            const carry = (stdoutCarry + text).slice(-512);
-            stdoutCarry = '';
-            const m = carry.match(/__WT_TOKEN__([A-Za-z0-9+/=]{10,})/);
-            if (m) apiToken = m[1];
+            // a small carry buffer and only clear it after a full 44-char match
+            // (Base64 of 32 bytes = exactly 44 chars including any = padding).
+            stdoutCarry = (stdoutCarry + text).slice(-512);
+            const m = stdoutCarry.match(/__WT_TOKEN__([A-Za-z0-9+/=]{44})/);
+            if (m) { apiToken = m[1]; stdoutCarry = ''; }
         });
 
         psServer.stderr.on('data', (data) => {
@@ -244,9 +239,11 @@ function startBackend(onProgress, onReady) {
 function pollBackend(onProgress, onReady) {
     let attempts = 0;
     const MAX_ATTEMPTS = 30;
-    const poll = setInterval(() => {
+    let readyFired = false;
+    const fireReady = () => { if (!readyFired) { readyFired = true; backendReady = true; onReady(); } };
+
+    const tick = () => {
         attempts++;
-        // Map polling 0..30 → 18%..84% with rotating cool lines
         const pct = Math.round(18 + (attempts / MAX_ATTEMPTS) * 66);
         onProgress(pct, COOL_LINES[attempts % COOL_LINES.length]);
 
@@ -257,38 +254,44 @@ function pollBackend(onProgress, onReady) {
             headers: apiToken ? { 'X-WT-Token': apiToken } : {}
         };
         http.get(reqOpts, (res) => {
-            // 200 (authenticated) or 403 (server listening but token checked later) means backend is up
-            if (res.statusCode === 200 || res.statusCode === 403) {
-                res.resume(); // drain
-                clearInterval(poll);
-                backendReady = true;
-                onReady();
+            res.resume(); // drain
+            // Only 200 means backend is authenticated and ready. 403 means it's
+            // listening but the token hasn't been received yet — keep polling.
+            if (res.statusCode === 200) {
+                fireReady();
             } else if (attempts >= MAX_ATTEMPTS) {
-                clearInterval(poll);
-                onReady(); // show UI anyway; API calls will retry
+                fireReady(); // show UI anyway; API calls will retry
+            } else {
+                setTimeout(tick, 500);
             }
         }).on('error', () => {
             if (attempts >= MAX_ATTEMPTS) {
-                clearInterval(poll);
-                onReady();
+                fireReady();
+            } else {
+                setTimeout(tick, 500);
             }
         });
-    }, 500);
+    };
+    setTimeout(tick, 500);
 }
 
 function killBackend() {
     if (psServer) {
         try { psServer.kill('SIGTERM'); } catch (_) {}
-        exec(`netstat -ano | findstr :${PORT}`, (err, stdout) => {
-            if (stdout) {
+        // Kill any leftover listeners on both ports; guard against PID 0 and
+        // our own PID which would kill the Electron process itself.
+        [PORT, FALLBACK_PORT].forEach(port => {
+            exec(`netstat -ano | findstr :${port}`, (err, stdout) => {
+                if (!stdout) return;
                 stdout.trim().split('\n').forEach(line => {
+                    if (!/LISTENING/i.test(line)) return;
                     const parts = line.trim().split(/\s+/);
-                    const pid = parts[parts.length - 1];
-                    if (pid && !isNaN(pid)) {
+                    const pid = Number(parts[parts.length - 1]);
+                    if (pid && pid !== 0 && pid !== process.pid) {
                         exec(`taskkill /PID ${pid} /F`);
                     }
                 });
-            }
+            });
         });
         psServer = null;
     }
@@ -405,7 +408,14 @@ ipcMain.handle('get-api-token', async () => {
     }
     return apiToken;
 });
-ipcMain.on('open-external', (event, url) => shell.openExternal(url));
+ipcMain.on('open-external', (event, url) => {
+    try {
+        const parsed = new URL(url);
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+            shell.openExternal(url);
+        }
+    } catch (_) {}
+});
 ipcMain.on('check-updates', () => checkForUpdates(true));
 
 // ─── App Lifecycle ───

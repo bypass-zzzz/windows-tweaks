@@ -34,13 +34,22 @@ async function fetchApiToken() {
             if (!API_TOKEN && window.electronAPI && window.electronAPI.getApiToken) {
                 try { API_TOKEN = (await window.electronAPI.getApiToken()) || ''; } catch (_) {}
             }
-            if (API_TOKEN) {
-                const opts = init || (typeof input === 'object' && input ? { ...input } : {});
-                const headers = new Headers((opts.headers) || (typeof input === 'object' && input ? input.headers : undefined));
-                headers.set('X-WT-Token', API_TOKEN);
+            const doFetch = (token) => {
+                const opts = init ? { ...init } : {};
+                const headers = new Headers(opts.headers || undefined);
+                if (token) headers.set('X-WT-Token', token);
                 opts.headers = headers;
                 return nativeFetch(input, opts);
+            };
+            let res = await doFetch(API_TOKEN);
+            // If backend restarted with new token, refresh and retry once
+            if (res.status === 403 && window.electronAPI && window.electronAPI.getApiToken) {
+                try {
+                    API_TOKEN = (await window.electronAPI.getApiToken()) || '';
+                    if (API_TOKEN) res = await doFetch(API_TOKEN);
+                } catch (_) {}
             }
+            return res;
         }
         return nativeFetch(input, init);
     };
@@ -514,31 +523,32 @@ function tweakState(id) {
     if (id === "rss") return !!(lastTcp && lastTcp.rss);
     if (id === "qosLimit") return !!(lastTcp && lastTcp.qosLimit);
     if (id === "tcpPorts") return !!(lastTcp && lastTcp.tcpPorts);
-    if (!lastTweaks) return false;
-    switch (id) {
-        case "hags": return !!lastTweaks.hags;
-        case "gameOpt": return !!lastTweaks.gameOptimizations;
-        case "dynamicTick": return !!lastTweaks.dynamicTickDisabled;
-        case "platformTick": return !!lastTweaks.platformTick;
-        case "kernelRamLock": return !!lastTweaks.kernelRamLock;
-        case "netThrottle": return !!lastTweaks.networkThrottlingDisabled;
-        case "gameDvr": return !!lastTweaks.gameDvrDisabled;
-        case "deliveryOpt": return !!lastTweaks.deliveryOptimizationDisabled;
-        case "powerPlan": return !!lastTweaks.ultimatePowerPlan;
-        case "gameMode": return !!lastTweaks.gameMode;
-        case "transparency": return !!lastTweaks.transparencyOff;
-        case "menuDelay": return !!lastTweaks.menuFast;
-        case "mousePrecision": return !!lastTweaks.precisionOff;
-        case "memCompression": return !!lastTweaks.memDecompressed;
-        case "cpuBoost": return !!lastTweaks.cpuBoost;
-        case "nvidiaRid": return !!lastTweaks.nvidiaRid;
-        case "hibernate": return !!lastTweaks.hibernate;
-        case "netbios": return !!lastTweaks.netbios;
-        case "teredo": return !!lastTweaks.teredo;
-        case "isatap": return !!lastTweaks.isatap;
-        case "sixtofour": return !!lastTweaks.sixtofour;
-        default: return !!lastCatalog[id];
+    if (lastTweaks) {
+        switch (id) {
+            case "hags": return !!lastTweaks.hags;
+            case "gameOpt": return !!lastTweaks.gameOptimizations;
+            case "dynamicTick": return !!lastTweaks.dynamicTickDisabled;
+            case "platformTick": return !!lastTweaks.platformTick;
+            case "kernelRamLock": return !!lastTweaks.kernelRamLock;
+            case "netThrottle": return !!lastTweaks.networkThrottlingDisabled;
+            case "gameDvr": return !!lastTweaks.gameDvrDisabled;
+            case "deliveryOpt": return !!lastTweaks.deliveryOptimizationDisabled;
+            case "powerPlan": return !!lastTweaks.ultimatePowerPlan;
+            case "gameMode": return !!lastTweaks.gameMode;
+            case "transparency": return !!lastTweaks.transparencyOff;
+            case "menuDelay": return !!lastTweaks.menuFast;
+            case "mousePrecision": return !!lastTweaks.precisionOff;
+            case "memCompression": return !!lastTweaks.memDecompressed;
+            case "cpuBoost": return !!lastTweaks.cpuBoost;
+            case "nvidiaRid": return !!lastTweaks.nvidiaRid;
+            case "hibernate": return !!lastTweaks.hibernate;
+            case "netbios": return !!lastTweaks.netbios;
+            case "teredo": return !!lastTweaks.teredo;
+            case "isatap": return !!lastTweaks.isatap;
+            case "sixtofour": return !!lastTweaks.sixtofour;
+        }
     }
+    return !!lastCatalog[id];
 }
 
 // Sync every static switch (network/system tabs) to the real probed state
@@ -630,7 +640,36 @@ function syncSwitches() {
 // "Remove Y", "Add Z"), so the switch being ON means that action is being
 // APPLIED. The old code showed a generic "Enabling <id>" with the raw id
 // (vbsOff), which contradicted the label and told the user nothing.
+const STATIC_TWEAK_LABELS = {
+    hags: "Hardware-Accelerated GPU Scheduling",
+    gameOpt: "Windowed Game Flip Optimizations",
+    dynamicTick: "Disable Dynamic Ticks",
+    platformTick: "Enforce Platform Timer",
+    kernelRamLock: "Lock Kernel in Physical RAM",
+    netThrottle: "Disable Network Throttling",
+    gameDvr: "Disable GameDVR Background Capture",
+    deliveryOpt: "Block Delivery Optimization P2P",
+    powerPlan: "High Performance Power Scheme",
+    gameMode: "Windows Game Mode",
+    transparency: "Disable Window Transparency",
+    menuDelay: "Instant Menus",
+    mousePrecision: "Disable Pointer Precision",
+    memCompression: "Disable Memory Compression",
+    cpuBoost: "Lock CPU to Max Frequency",
+    nvidiaRid: "NVIDIA Ultra-Low-Latency Flag",
+    tcpNoDelay: "Disable Nagle's Algorithm (TCPNoDelay)",
+    tcpAckFreq: "Disable Delayed ACKs",
+    rss: "Receive Side Scaling (RSS)",
+    qosLimit: "Remove QoS Reserved Bandwidth",
+    tcpPorts: "Expand Ephemeral Ports + Fast Recycle",
+    hibernate: "Disable Hibernation",
+    netbios: "Disable NetBIOS",
+    teredo: "Disable Teredo Tunneling",
+    isatap: "Disable ISATAP",
+    sixtofour: "Disable 6to4 Tunneling"
+};
 function tweakName(id) {
+    if (STATIC_TWEAK_LABELS[id]) return STATIC_TWEAK_LABELS[id];
     const row = (cachedCatalogList || []).find(t => t.id === id);
     return (row && row.label) ? row.label : id;
 }
@@ -658,6 +697,8 @@ async function setTweak(id, enabled) {
         tcpPorts: 'tcpPorts'
     };
     lastCatalog[id] = !!enabled;
+    const cachedEntry = (cachedCatalogList || []).find(t => t.id === id);
+    if (cachedEntry) cachedEntry.active = !!enabled;
     if (lastTweaks && TWEAK_MAP[id]) lastTweaks[TWEAK_MAP[id]] = !!enabled;
     if (lastTcp && TCP_MAP[id]) lastTcp[TCP_MAP[id]] = !!enabled;
     syncSwitches();
@@ -1310,6 +1351,7 @@ async function revertDefaults() {
             showToast("Defaults restored successfully.", "info");
             fetchSystemStatus();
             fetchNetworkStatus();
+            fetchCatalog(); // refresh General Tweaks switches to reflect reverted state
         }
     } catch (e) {
         appendLog(`[ERROR] Revert failed: ${e.message}`, "err");
@@ -1691,9 +1733,10 @@ async function disableAllTasks() {
 }
 
 const PROTECTED_PROCESSES = new Set([
-    'lsass.exe', 'csrss.exe', 'winlogon.exe', 'services.exe', 'smss.exe',
-    'wininit.exe', 'System', 'Registry', 'Idle', 'MemCompression',
-    'SecurityHealthService.exe', 'MsMpEng.exe', 'dwm.exe', 'svchost.exe'
+    'lsass', 'csrss', 'winlogon', 'services', 'smss',
+    'wininit', 'System', 'Registry', 'Idle', 'MemCompression',
+    'SecurityHealthService', 'MsMpEng', 'dwm', 'svchost',
+    'fontdrvhost', 'ntoskrnl', 'conhost', 'explorer'
 ]);
 
 async function fetchProcesses() {
