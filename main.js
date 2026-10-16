@@ -18,6 +18,9 @@ let stdoutCarry = '';
 let backendReady = false;
 const PORT = 48921;
 const FALLBACK_PORT = 48922;
+// Whichever port the backend actually bound. server.ps1 retries on
+// FALLBACK_PORT when PORT is already taken, so this is not always PORT.
+let activePort = PORT;
 function serverScriptPath() {
     // Packaged builds unpack server.ps1 next to the asar — powershell.exe
     // cannot read files from inside app.asar, so never point it there.
@@ -181,6 +184,7 @@ function freePorts(ports, done) {
 function startBackend(onProgress, onReady) {
     onProgress(10, COOL_LINES[0]);
     backendReady = false;
+    activePort = PORT;
 
     const script = serverScriptPath();
     try {
@@ -247,29 +251,55 @@ function pollBackend(onProgress, onReady) {
         const pct = Math.round(18 + (attempts / MAX_ATTEMPTS) * 66);
         onProgress(pct, COOL_LINES[attempts % COOL_LINES.length]);
 
-        const reqOpts = {
-            hostname: '127.0.0.1',
-            port: PORT,
-            path: '/api/status',
-            headers: apiToken ? { 'X-WT-Token': apiToken } : {}
-        };
-        http.get(reqOpts, (res) => {
-            res.resume(); // drain
-            // Only 200 means backend is authenticated and ready. 403 means it's
-            // listening but the token hasn't been received yet — keep polling.
-            if (res.statusCode === 200) {
-                fireReady();
-            } else if (attempts >= MAX_ATTEMPTS) {
+        // The backend binds PORT unless it is already taken, in which case
+        // server.ps1 retries on FALLBACK_PORT. Probe both within the same tick and
+        // remember which one answered, so a fallback backend is detected on the
+        // first tick instead of after all 30 attempts (~15s of stalled splash).
+        const ports = [PORT, FALLBACK_PORT];
+        let pending = ports.length;
+        let settled = false;
+
+        const retryOrGiveUp = () => {
+            if (settled) return;
+            settled = true;
+            if (attempts >= MAX_ATTEMPTS) {
                 fireReady(); // show UI anyway; API calls will retry
             } else {
                 setTimeout(tick, 500);
             }
-        }).on('error', () => {
-            if (attempts >= MAX_ATTEMPTS) {
-                fireReady();
-            } else {
-                setTimeout(tick, 500);
-            }
+        };
+
+        ports.forEach(port => {
+            let finished = false;
+            const finish = (ready) => {
+                if (finished) return;
+                finished = true;
+                if (ready) {
+                    activePort = port;
+                    settled = true;
+                    fireReady();
+                } else if (--pending === 0) {
+                    retryOrGiveUp();
+                }
+            };
+
+            const req = http.get({
+                hostname: '127.0.0.1',
+                port,
+                path: '/api/status',
+                timeout: 1000,
+                headers: apiToken ? { 'X-WT-Token': apiToken } : {}
+            }, (res) => {
+                res.resume(); // drain
+                // Only 200 means backend is authenticated and ready. 403 means it's
+                // listening but the token hasn't been received yet — keep polling.
+                finish(res.statusCode === 200);
+            });
+            // A port that accepts the connection but never answers must not wedge
+            // the loop: `pending` would never reach zero and the tick would never
+            // retry. destroy() surfaces an error, which settles this probe.
+            req.on('timeout', () => req.destroy());
+            req.on('error', () => finish(false));
         });
     };
     setTimeout(tick, 500);
@@ -398,7 +428,9 @@ ipcMain.handle('get-is-admin', async () => {
     });
 });
 
-ipcMain.handle('get-port', () => PORT);
+// Report the port the backend actually bound, not the preferred one: on a
+// fallback the renderer would otherwise be pointed at a dead port.
+ipcMain.handle('get-port', () => activePort);
 // Per-process API token, read off the backend's stdout. Polls briefly because the
 // renderer can ask before the marker line arrives; the backend prints it before the
 // listener serves anything, so this resolves on the first or second tick.
