@@ -32,7 +32,8 @@
     min-height: 100vh; overflow: hidden; user-select: none;
     -webkit-app-region: drag;
     /* Pure black stage. The W is the only lit thing in it. The wash picks up
-       the active theme's highlight colour; monochrome falls back to white. */
+       the active theme's highlight colour; it stays white until the engine
+       has run. */
     background-image: radial-gradient(ellipse 55% 38% at 50% 46%, var(--wash-1, rgba(255,255,255,0.055)) 0%, transparent 62%);
   }
 

@@ -9,8 +9,11 @@
    <html>; css/style.css reads those variables everywhere. There is no
    [data-theme] CSS any more, so adding a theme = ONE entry in THEMES below.
 
-   `mono` is special: its palette is the hand-tuned default in style.css and
-   the engine only clears its inline overrides (untinted mode).
+   The engine still knows how to clear back to the hand-tuned defaults in
+   style.css (the `mono` branch: no inline overrides, no `data-tinted`) but
+   no entry uses it — platinum is the hardcoded default (DEFAULT_ID) and an
+   unknown or missing saved id resolves there, so stale saves from a pruned
+   palette land somewhere valid instead of rendering a half-cleared page.
 
    `data-tinted` on <html> marks "coloured theme active" and is what the
    stylesheet keys its two motion/extra flavours off (mono vs everything else).
@@ -20,25 +23,24 @@
 
     var STORE_KEY = "wt.theme";
 
+    /* The theme a fresh install (or a stale saved id) lands on. Resolved via
+       byId(), so if platinum is ever pruned the default degrades to the first
+       entry instead of breaking. */
+    var DEFAULT_ID = "platinum";
+
     /* Authored pairs, in the order they were supplied. */
     var THEMES = [
-        { id: "mono",     name: "Monochrome", primary: "#ffffff", accent: "#000000", mono: true },
         { id: "obsidian", name: "Obsidian",   primary: "#ff2d55", accent: "#0d0507" },
         { id: "oxblood",  name: "Oxblood",    primary: "#8b0000", accent: "#080808" },
         { id: "midnight", name: "Midnight",   primary: "#080808", accent: "#191970" },
         { id: "amethyst", name: "Amethyst",   primary: "#080808", accent: "#6a0dad" },
         { id: "copper",   name: "Copper",     primary: "#252525", accent: "#b87333" },
-        { id: "wine",     name: "Wine",       primary: "#660000", accent: "#111111" },
-        { id: "indigo",   name: "Indigo",     primary: "#4b0082", accent: "#0a0a0a" },
         { id: "forest",   name: "Forest",     primary: "#006400", accent: "#151515" },
         { id: "prussian", name: "Prussian",   primary: "#003153", accent: "#171717" },
-        { id: "neon",     name: "Neon",       primary: "#39ff14", accent: "#101010" },
         { id: "azure",    name: "Azure",      primary: "#00bfff", accent: "#121212" },
-        { id: "magenta",  name: "Magenta",    primary: "#ff00ff", accent: "#161616" },
         { id: "molten",   name: "Molten",     primary: "#ff4500", accent: "#141414" },
         { id: "gold",     name: "Gold",       primary: "#d4af37", accent: "#202020" },
-        { id: "platinum", name: "Platinum",   primary: "#c0c0c0", accent: "#181818" },
-        { id: "bordeaux", name: "Bordeaux",   primary: "#800020", accent: "#d8cfc4" },
+        { id: "platinum", name: "Platinum",   primary: "#ffffff", accent: "#000000" },
         { id: "slate",    name: "Slate",      primary: "#708090", accent: "#e5e5e5" }
     ];
 
@@ -204,7 +206,14 @@
     }
 
     function savedId() {
-        try { return localStorage.getItem(STORE_KEY) || "mono"; } catch (_) { return "mono"; }
+        /* A stored id only wins if it is still in the palette; anything else
+           (first run, or a theme pruned since the last visit) falls back to
+           the hardcoded default. */
+        try {
+            var stored = localStorage.getItem(STORE_KEY);
+            for (var i = 0; i < THEMES.length; i++) if (THEMES[i].id === stored) return stored;
+        } catch (_) { /* file:// storage may be unavailable */ }
+        return byId(DEFAULT_ID).id;
     }
 
     window.WTTheme = {

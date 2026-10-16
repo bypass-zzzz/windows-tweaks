@@ -9,8 +9,9 @@
     <link rel="icon" type="image/jpeg" href="assets/logo.jpg">
     <script src="js/themes.js"></script>
     <script>
-        // Apply the saved theme before first paint so a themed palette never
-        // flashes as monochrome. Engine + storage key live in js/themes.js.
+        // Apply the saved (or default) theme before first paint so a themed
+        // palette never flashes as the raw default chrome. Engine + storage
+        // key live in js/themes.js.
         try { WTTheme.applySaved(); } catch (_) {}
     </script>
     <style>
@@ -896,7 +897,7 @@
             </svg>
             <div class="wheel-center" aria-hidden="true">
                 <div class="wheel-swatches" id="wheelSwatches"><i></i><i></i></div>
-                <div class="wheel-name" id="wheelName">Monochrome</div>
+                <div class="wheel-name" id="wheelName">Platinum</div>
                 <div class="wheel-hex" id="wheelHex">#ffffff · #000000</div>
                 <div class="wheel-action" id="wheelAction">Current theme</div>
             </div>
