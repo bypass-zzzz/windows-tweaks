@@ -120,40 +120,192 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 // -----------------------------------------------------------------------------
-// THEME TOGGLE â€” Monochrome (default) <-> Obsidian (black & red)
-// The Obsidian palette is entirely in CSS under [data-theme="obsidian"], so
-// this only flips the attribute on <html> and syncs the button label.
-// Choice persists in localStorage and is applied before first paint by the
-// inline snippet in index.html, so there is no flash of the wrong theme.
+// THEME WHEEL — radial theme picker (replaces the old Mono/Obsidian toggle)
+// Palettes come from js/themes.js; the wheel is drawn here from that same
+// list, so a new theme appears in the picker with no code in this file.
+// The choice persists in localStorage and is applied before first paint by
+// js/themes.js + the inline snippet in index.html (no flash of the wrong theme).
 // -----------------------------------------------------------------------------
-const THEME_KEY = "wt.theme";
+const SVG_NS = "http://www.w3.org/2000/svg";
+const WHEEL_GEO = { cx: 280, cy: 280, rOut: 252, rIn: 150, gapDeg: 1.6 };
 
-function applyTheme(theme) {
-    const obsidian = theme === "obsidian";
-    if (obsidian) {
-        document.documentElement.setAttribute("data-theme", "obsidian");
-    } else {
-        document.documentElement.removeAttribute("data-theme");
-    }
+const wheelState = { built: false, open: false, index: 0, segs: [], lastFocus: null };
+
+function wheelPoint(radius, angleDeg) {
+    const a = (angleDeg - 90) * Math.PI / 180;
+    return {
+        x: (WHEEL_GEO.cx + radius * Math.cos(a)).toFixed(2),
+        y: (WHEEL_GEO.cy + radius * Math.sin(a)).toFixed(2)
+    };
+}
+
+function themeIndexOf(id) {
+    const list = WTTheme.list();
+    for (let i = 0; i < list.length; i++) if (list[i].id === id) return i;
+    return 0;
+}
+
+function syncThemeButton() {
     const label = document.getElementById("themeToggleLabel");
-    if (label) label.textContent = obsidian ? "Obsidian" : "Mono";
+    if (label) {
+        const list = WTTheme.list();
+        const t = list.find((x) => x.id === WTTheme.current()) || list[0];
+        label.textContent = t.name;
+    }
     const btn = document.getElementById("btnThemeToggle");
-    if (btn) btn.setAttribute("aria-pressed", obsidian ? "true" : "false");
+    if (btn) btn.setAttribute("aria-expanded", wheelState.open ? "true" : "false");
+}
+
+function markCurrentSegment(id) {
+    wheelState.segs.forEach((seg) => seg.classList.toggle("is-current", seg.dataset.themeId === id));
+}
+
+function previewTheme(index) {
+    const list = WTTheme.list();
+    const n = list.length;
+    if (!n) return;
+    wheelState.index = ((index % n) + n) % n;
+    const theme = list[wheelState.index];
+    wheelState.segs.forEach((seg, i) => seg.classList.toggle("is-hot", i === wheelState.index));
+    const name = document.getElementById("wheelName");
+    const hexEl = document.getElementById("wheelHex");
+    const swatches = document.querySelectorAll("#wheelSwatches i");
+    if (name) name.textContent = theme.name;
+    if (hexEl) hexEl.textContent = theme.primary + " · " + theme.accent;
+    if (swatches.length === 2) {
+        swatches[0].style.background = theme.primary;
+        swatches[1].style.background = theme.accent;
+    }
+}
+
+function applyThemeById(id, announce) {
+    const theme = WTTheme.apply(id);
+    wheelState.index = themeIndexOf(theme.id);
+    markCurrentSegment(theme.id);
+    syncThemeButton();
+    if (announce) showToast(theme.name + " theme applied", "info");
+}
+
+function buildThemeWheel() {
+    const segsGroup = document.getElementById("wheelSegs");
+    const defs = document.getElementById("wheelDefs");
+    if (!segsGroup || !defs) return;
+    const themes = WTTheme.list();
+    const n = themes.length;
+    if (!n) return;
+    const ang = 360 / n;
+    const half = WHEEL_GEO.gapDeg / 2;
+
+    themes.forEach((theme, i) => {
+        const a0 = i * ang + half;
+        const a1 = (i + 1) * ang - half;
+        const mid = i * ang + ang / 2;
+
+        const p1 = wheelPoint(WHEEL_GEO.rOut, a0);
+        const p2 = wheelPoint(WHEEL_GEO.rOut, a1);
+        const p3 = wheelPoint(WHEEL_GEO.rIn, a1);
+        const p4 = wheelPoint(WHEEL_GEO.rIn, a0);
+        const d = "M " + p1.x + " " + p1.y +
+            " A " + WHEEL_GEO.rOut + " " + WHEEL_GEO.rOut + " 0 0 1 " + p2.x + " " + p2.y +
+            " L " + p3.x + " " + p3.y +
+            " A " + WHEEL_GEO.rIn + " " + WHEEL_GEO.rIn + " 0 0 0 " + p4.x + " " + p4.y + " Z";
+
+        // One gradient per wedge: shell at the inner edge, highlight at the
+        // outer — the wedge literally previews the theme's authored pair.
+        const gid = "wg-" + theme.id;
+        const gi = wheelPoint(WHEEL_GEO.rIn + 8, mid);
+        const go = wheelPoint(WHEEL_GEO.rOut - 6, mid);
+        const gradient = document.createElementNS(SVG_NS, "linearGradient");
+        gradient.setAttribute("id", gid);
+        gradient.setAttribute("gradientUnits", "userSpaceOnUse");
+        gradient.setAttribute("x1", gi.x); gradient.setAttribute("y1", gi.y);
+        gradient.setAttribute("x2", go.x); gradient.setAttribute("y2", go.y);
+        const stopA = document.createElementNS(SVG_NS, "stop");
+        stopA.setAttribute("offset", "0"); stopA.setAttribute("stop-color", theme.shell);
+        const stopB = document.createElementNS(SVG_NS, "stop");
+        stopB.setAttribute("offset", "1"); stopB.setAttribute("stop-color", theme.highlight);
+        gradient.appendChild(stopA);
+        gradient.appendChild(stopB);
+        defs.appendChild(gradient);
+
+        const seg = document.createElementNS(SVG_NS, "path");
+        seg.setAttribute("d", d);
+        seg.setAttribute("fill", "url(#" + gid + ")");
+        seg.setAttribute("class", "wheel-seg");
+        seg.dataset.themeId = theme.id;
+        seg.addEventListener("mouseenter", () => previewTheme(i));
+        seg.addEventListener("click", () => {
+            applyThemeById(theme.id, true);
+            closeThemeWheel();
+        });
+        segsGroup.appendChild(seg);
+        wheelState.segs.push(seg);
+    });
+    wheelState.built = true;
+    markCurrentSegment(WTTheme.current());
+}
+
+function openThemeWheel() {
+    const overlay = document.getElementById("themeWheel");
+    const panel = document.getElementById("wheelPanel");
+    if (!overlay || !panel) return;
+    if (!wheelState.built) buildThemeWheel();
+    wheelState.lastFocus = document.activeElement;
+    wheelState.open = true;
+    previewTheme(themeIndexOf(WTTheme.current()));
+    overlay.hidden = false;
+    void overlay.offsetWidth;           // flush layout so the open transition runs
+    overlay.classList.add("open");
+    panel.focus({ preventScroll: true });
+    syncThemeButton();
+}
+
+function closeThemeWheel() {
+    const overlay = document.getElementById("themeWheel");
+    if (!overlay || !wheelState.open) return;
+    wheelState.open = false;
+    overlay.classList.remove("open");
+    overlay.classList.add("closing");
+    window.setTimeout(() => {
+        overlay.hidden = true;
+        overlay.classList.remove("closing");
+    }, 220);
+    wheelState.segs.forEach((seg) => seg.classList.remove("is-hot"));
+    if (wheelState.lastFocus && typeof wheelState.lastFocus.focus === "function") {
+        wheelState.lastFocus.focus({ preventScroll: true });
+    }
+    syncThemeButton();
 }
 
 function initThemeToggle() {
-    let stored = null;
-    try { stored = localStorage.getItem(THEME_KEY); } catch (_) {}
-    applyTheme(stored || "mono");
-
     const btn = document.getElementById("btnThemeToggle");
-    if (!btn) return;
+    const overlay = document.getElementById("themeWheel");
+    const panel = document.getElementById("wheelPanel");
+    const closeBtn = document.getElementById("wheelClose");
+
+    WTTheme.applySaved();               // re-assert the pre-paint choice
+    wheelState.index = themeIndexOf(WTTheme.current());
+    syncThemeButton();
+
+    if (!btn || !overlay) return;
     btn.addEventListener("click", () => {
-        const next = document.documentElement.getAttribute("data-theme") === "obsidian" ? "mono" : "obsidian";
-        applyTheme(next);
-        try { localStorage.setItem(THEME_KEY, next); } catch (_) {}
-        showToast(next === "obsidian" ? "Obsidian theme (black & red)" : "Monochrome theme", "info");
+        if (wheelState.open) closeThemeWheel();
+        else openThemeWheel();
     });
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) closeThemeWheel(); });
+    if (closeBtn) closeBtn.addEventListener("click", closeThemeWheel);
+    if (panel) {
+        panel.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") { e.preventDefault(); closeThemeWheel(); }
+            else if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); previewTheme(wheelState.index + 1); }
+            else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); previewTheme(wheelState.index - 1); }
+            else if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                const theme = WTTheme.list()[wheelState.index];
+                if (theme) { applyThemeById(theme.id, true); closeThemeWheel(); }
+            }
+        });
+    }
 }
 
 // -----------------------------------------------------------------------------

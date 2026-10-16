@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Windows Tweaks — Loading</title>
+<script src="js/themes.js"></script>
+<script>try { WTTheme.applySaved(); } catch (_) {}</script>
 <style>
   /* ==========================================================================
      SPLASH - black stage, white W, then out.
@@ -29,8 +31,9 @@
     display: flex; align-items: center; justify-content: center;
     min-height: 100vh; overflow: hidden; user-select: none;
     -webkit-app-region: drag;
-    /* Pure black stage. The W is the only lit thing in it. */
-    background-image: radial-gradient(ellipse 55% 38% at 50% 46%, rgba(255,255,255,0.055) 0%, transparent 62%);
+    /* Pure black stage. The W is the only lit thing in it. The wash picks up
+       the active theme's highlight colour; monochrome falls back to white. */
+    background-image: radial-gradient(ellipse 55% 38% at 50% 46%, var(--wash-1, rgba(255,255,255,0.055)) 0%, transparent 62%);
   }
 
   .stage {
@@ -94,8 +97,8 @@
     position: relative;
     width: 104px; height: 104px;
     border-radius: 26px; overflow: hidden;
-    background: #0b0b0e;
-    border: 1px solid rgba(255,255,255,0.10);
+    background: var(--boot-logo-bg, #0b0b0e);
+    border: 1px solid var(--boot-logo-border, rgba(255,255,255,0.10));
     isolation: isolate;
     animation: logoIn 0.85s var(--ease-out-expo) both,
                wGlow 3.1s ease-in-out 0.85s infinite;
@@ -147,7 +150,7 @@
      laid down rather than appearing. */
   .splash-title {
     font-size: 1.24rem; font-weight: 800; letter-spacing: .26em; text-indent: .26em;
-    background: linear-gradient(180deg, #fff 22%, #b8b8c0 100%);
+    background: var(--boot-title-grad, linear-gradient(180deg, #fff 22%, #b8b8c0 100%));
     -webkit-background-clip: text; background-clip: text;
     -webkit-text-fill-color: transparent; color: transparent;
     animation: wipe 0.8s var(--ease-out-expo) 0.28s both;
@@ -179,14 +182,14 @@
   /* -- progress ----------------------------------------------------------- */
   .bar {
     margin-top: 26px; height: 3px; border-radius: 999px;
-    background: rgba(255,255,255,0.08); overflow: hidden;
+    background: var(--boot-bar-bg, rgba(255,255,255,0.08)); overflow: hidden;
     animation: fadeUp 0.6s var(--ease-out-expo) 0.8s both;
   }
   .bar > div {
     height: 100%; width: 0%;
     border-radius: 999px;
-    background: linear-gradient(90deg, rgba(255,255,255,0.35), #fff 70%, rgba(255,255,255,0.85));
-    box-shadow: 0 0 14px rgba(255,255,255,0.55);
+    background: var(--boot-fill-bg, linear-gradient(90deg, rgba(255,255,255,0.35), #fff 70%, rgba(255,255,255,0.85)));
+    box-shadow: var(--boot-fill-glow, 0 0 14px rgba(255,255,255,0.55));
     transition: width 0.45s var(--ease-out-expo);
     position: relative; overflow: hidden;
   }

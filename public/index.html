@@ -7,14 +7,11 @@
     <title>Windows Tweaks // Windows Optimizations for Gaming</title>
     <link rel="stylesheet" href="css/style.css">
     <link rel="icon" type="image/jpeg" href="assets/logo.jpg">
+    <script src="js/themes.js"></script>
     <script>
-        // Apply the saved theme before first paint so the Obsidian palette
-        // never flashes as monochrome. Must stay in sync with THEME_KEY in app.js.
-        try {
-            if (localStorage.getItem("wt.theme") === "obsidian") {
-                document.documentElement.setAttribute("data-theme", "obsidian");
-            }
-        } catch (_) {}
+        // Apply the saved theme before first paint so a themed palette never
+        // flashes as monochrome. Engine + storage key live in js/themes.js.
+        try { WTTheme.applySaved(); } catch (_) {}
     </script>
     <style>
         .titlebar { -webkit-app-region: drag; height: 0; position: fixed; top: 0; left: 0; right: 160px; z-index: 9999; }
@@ -70,7 +67,7 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
                 Check for Updates
             </button>
-            <button id="btnThemeToggle" class="theme-toggle" title="Switch between Monochrome and Obsidian (black &amp; red)">
+            <button id="btnThemeToggle" class="theme-toggle" title="Change theme" aria-haspopup="dialog" aria-expanded="false">
                 <span class="dot"></span>
                 <span id="themeToggleLabel">Mono</span>
             </button>
@@ -872,6 +869,25 @@
 
     <!-- TOAST CONTAINER -->
     <div class="toast-container" id="toastContainer"></div>
+
+    <!-- THEME WHEEL — radial picker. Wedges are drawn at runtime from the
+         theme list in js/themes.js; this markup is only the shell. -->
+    <div id="themeWheel" class="wheel-overlay" hidden>
+        <div class="wheel-panel" id="wheelPanel" role="dialog" aria-modal="true"
+             aria-label="Choose a theme. Arrow keys cycle, Enter applies, Escape closes." tabindex="-1">
+            <svg class="wheel-graph" viewBox="0 0 560 560" aria-hidden="true">
+                <defs id="wheelDefs"></defs>
+                <g id="wheelSegs"></g>
+            </svg>
+            <div class="wheel-center" aria-hidden="true">
+                <div class="wheel-swatches" id="wheelSwatches"><i></i><i></i></div>
+                <div class="wheel-name" id="wheelName">Monochrome</div>
+                <div class="wheel-hex" id="wheelHex">#ffffff · #000000</div>
+            </div>
+            <button class="wheel-close" id="wheelClose" type="button" aria-label="Close theme picker">✕</button>
+            <div class="wheel-hint">Esc to close · click a wedge to apply</div>
+        </div>
+    </div>
 
     <script src="js/app.js"></script>
     <script>
