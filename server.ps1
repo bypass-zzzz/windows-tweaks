@@ -439,6 +439,160 @@ function Get-PreferredPowerScheme {
     if ($hp) { return $hp }
     return $null
 }
+# -----------------------------------------------------------------------------
+# STATIC TWEAK STATE - the single definition of "is this tweak applied"
+#
+# Get-SystemAudit fills the dashboard and the quick switches from this, and
+# Set-TweakState reads it back after every write, so the dashboard, the switch
+# on screen and the write path can never disagree about what the machine
+# actually did. The ~21 switch branches in Set-TweakState used to return
+# success = $true without reading anything, so a write that silently did
+# nothing (a refused BCD edit, a wrong registry hive, a powercfg that needed
+# elevation) still produced a success toast.
+#
+# Conventions, kept from the audit this was lifted out of:
+#   $true / $false = the state was read and is / is not applied
+#   $null          = the read did not answer; the UI renders a dash
+# -----------------------------------------------------------------------------
+function Get-StaticTweakStates {
+    param([string[]]$GpuNames)
+
+    $out = @{}
+
+    # HAGS
+    $out.hags = ((Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "HwSchMode" -ErrorAction SilentlyContinue).HwSchMode -eq 2)
+
+    # Windows 11 Flip Optimizations (on by default - missing value means enabled)
+    $autoOpt = (Get-ItemProperty "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences" -Name "AutoOptimizationsEnabled" -ErrorAction SilentlyContinue).AutoOptimizationsEnabled
+    $out.gameOpt = (($null -eq $autoOpt) -or ($autoOpt -eq 1))
+
+    # BCD timers - one bcdedit read serves both
+    $bcd = (bcdedit /enum "{current}" 2>$null) | Out-String
+    $out.dynamicTick = ($bcd -match "disabledynamictick\s+Yes")
+    $out.platformTick = ($bcd -match "useplatformtick\s+Yes")
+
+    # Kernel RAM lock (DisablePagingExecutive)
+    $out.kernelRamLock = ((Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "DisablePagingExecutive" -ErrorAction SilentlyContinue).DisablePagingExecutive -eq 1)
+
+    # Network throttling. NetworkThrottlingIndex is a DWORD and reads back
+    # unsigned as 4294967295; PowerShell 5.1 parses 0xffffffff as Int32 -1, so
+    # compare the real unsigned value widened to Int64.
+    $netThrottle = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -ErrorAction SilentlyContinue).NetworkThrottlingIndex
+    $out.netThrottle = ((([int64]$netThrottle) -eq 4294967295) -or (([int64]$netThrottle) -eq -1))
+
+    # GameDVR
+    $out.gameDvr = ((Get-ItemProperty "HKCU:\System\GameConfigStore" -Name "GameDVR_Enabled" -ErrorAction SilentlyContinue).GameDVR_Enabled -eq 0)
+
+    # Delivery Optimization P2P - 99 or 0 both mean "not using Delivery Optimization"
+    $doMode = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization" -Name "DODownloadMode" -ErrorAction SilentlyContinue).DODownloadMode
+    $out.deliveryOpt = ($doMode -eq 99 -or $doMode -eq 0)
+
+    # Game Mode is on by default - a missing value means enabled, not disabled
+    $gameBarProps = Get-ItemProperty "HKCU:\SOFTWARE\Microsoft\GameBar" -ErrorAction SilentlyContinue
+    $gameBarAuto = if ($null -ne $gameBarProps -and $null -ne $gameBarProps.AutoGameModeEnabled) { $gameBarProps.AutoGameModeEnabled } else { $gameBarProps.AllowAutoGameMode }
+    $out.gameMode = (($null -eq $gameBarAuto) -or ($gameBarAuto -eq 1))
+
+    # Transparency, menu delay, mouse precision
+    $out.transparency = ((Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -ErrorAction SilentlyContinue).EnableTransparency -eq 0)
+    $out.menuDelay = ((Get-ItemProperty "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -ErrorAction SilentlyContinue).MenuShowDelay -eq "0")
+    $out.mousePrecision = ((Get-ItemProperty "HKCU:\Control Panel\Mouse" -Name "MouseSpeed" -ErrorAction SilentlyContinue).MouseSpeed -eq "0")
+
+    # Memory compression. The property is MemoryCompression - there is no
+    # MemoryCompressionEnabled - and an unreadable MMAgent is unknown, not
+    # "compression off".
+    $mmAgent = Get-MMAgent -ErrorAction SilentlyContinue
+    $out.memCompression = if ($null -ne $mmAgent) { ($mmAgent.MemoryCompression -eq $false) } else { $null }
+
+    # CPU boost - powercfg can fail to answer, and "no answer" is not the same
+    # claim as "boost is capped for background work".
+    $cpuMinAc = Get-PowerAcValue "SUB_PROCESSOR" "PROCTHROTTLEMIN"
+    $cpuMaxAc = Get-PowerAcValue "SUB_PROCESSOR" "PROCTHROTTLEMAX"
+    $out.cpuBoost = if ($null -ne $cpuMinAc -and $null -ne $cpuMaxAc) { ($cpuMinAc -eq 100 -and $cpuMaxAc -eq 100) } else { $null }
+
+    # NVIDIA RID, gated on an NVIDIA GPU actually being present
+    if ($null -eq $GpuNames) {
+        $GpuNames = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    }
+    $out.nvidiaAvailable = [bool]($GpuNames -match "NVIDIA")
+    $nvidiaRid = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\nvlddmkm\FTS" -Name "EnableRID61684" -ErrorAction SilentlyContinue).EnableRID61684
+    $out.nvidiaRid = ($out.nvidiaAvailable -and ($nvidiaRid -eq 1))
+
+    # Hibernate - hiberfil.sys exists exactly when hibernation is on
+    $out.hibernate = -not (Test-Path "$env:SystemDrive\hiberfil.sys")
+
+    # NetBIOS is per-adapter: read it off the adapter this app manages, using
+    # the same InterfaceIndex bridge into WMI that the audit uses.
+    $primaryNic = Get-PrimaryAdapter
+    $nbtOpts = $null
+    if ($primaryNic) {
+        $nbtOpts = (Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex=$($primaryNic.InterfaceIndex)" -ErrorAction SilentlyContinue).TcpipNetbiosOptions
+    }
+    $out.netbios = ($nbtOpts -eq 2)
+
+    # Legacy tunnel adapters. A failed netsh produces no output at all, and a
+    # regex that finds no match in an empty string is not evidence that the
+    # tunnel is enabled - so empty output is $null rather than a confident
+    # "not disabled".
+    $teredoOut = ((& netsh.exe interface teredo show state 2>$null) | Out-String)
+    $out.teredo = if ($teredoOut.Trim().Length -gt 0) { [bool]($teredoOut -match '(State|Type)\s*:\s*disabled') } else { $null }
+    $isatapOut = ((& netsh.exe interface isatap show state 2>$null) | Out-String)
+    $out.isatap = if ($isatapOut.Trim().Length -gt 0) { [bool]($isatapOut -match '(State|Type)\s*:\s*disabled') } else { $null }
+    $sitoOut = ((& netsh.exe interface 6to4 show state 2>$null) | Out-String)
+    $out.sixtofour = if ($sitoOut.Trim().Length -gt 0) { [bool]($sitoOut -match '(State|Type)\s*:\s*disabled') } else { $null }
+
+    # Power scheme - the same matcher the dashboard has always used
+    $activePlan = (powercfg /getactivescheme 2>$null)
+    $out.powerPlan = [bool]($activePlan -match "Ultimate Performance|High performance|Hybred")
+
+    # TCP registry tweaks target the same adapter Set-TweakState writes to.
+    # $null when no adapter GUID is available: nothing was read.
+    $tcpAdapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" -and $_.Virtual -ne $true } | Select-Object -First 1
+    if (-not $tcpAdapter) { $tcpAdapter = Get-NetAdapter -ErrorAction SilentlyContinue | Select-Object -First 1 }
+    $tcpReg = if ($tcpAdapter -and $tcpAdapter.InterfaceGuid) { "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($tcpAdapter.InterfaceGuid)" } else { $null }
+    if ($tcpReg) {
+        $tcpProps = Get-ItemProperty -Path $tcpReg -ErrorAction SilentlyContinue
+        $out.tcpNoDelay = ($tcpProps.TCPNoDelay -eq 1 -and $tcpProps.TcpDelAckTicks -eq 0)
+        $out.tcpAckFreq = ($tcpProps.TcpAckFrequency -eq 1)
+    } else {
+        $out.tcpNoDelay = $null
+        $out.tcpAckFreq = $null
+    }
+
+    # RSS - the global setting the toggle writes, read the same way the Network
+    # tab reads it (netsh), so both views agree.
+    $g = ((netsh int tcp show global 2>$null) | Out-String)
+    $out.rss = [bool]($g -match "Receive-Side Scaling State\s*:\s*enabled")
+
+    # QoS reserved bandwidth + ephemeral port policy
+    $out.qosLimit = ((Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Psched" -Name "NonBestEffortLimit" -ErrorAction SilentlyContinue).NonBestEffortLimit -eq 0)
+    $tcpParams = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+    $mup = (Get-ItemProperty -Path $tcpParams -Name "MaxUserPort" -ErrorAction SilentlyContinue).MaxUserPort
+    $twd = (Get-ItemProperty -Path $tcpParams -Name "TcpTimedWaitDelay" -ErrorAction SilentlyContinue).TcpTimedWaitDelay
+    $out.tcpPorts = ($mup -eq 65534 -and $twd -eq 30)
+
+    return $out
+}
+
+# Shape the answer to a switch write from what the machine actually reports.
+# A dry run intercepts the write, so "not applied" there is the expected
+# outcome and is marked blocked - an interception is not a write failure.
+function Get-TweakWriteResult($id, $on, [switch]$Reboot) {
+    $states = Get-StaticTweakStates
+    $state = $states[$id]
+    $applied = ($null -ne $state -and $state -eq [bool]$on)
+    $result = @{ success = $applied; id = $id; enabled = $(if ($null -ne $state) { $state } else { [bool]$on }) }
+    if ($Reboot) { $result.reboot = $true }
+    if (-not $applied) {
+        if ($DryRun) {
+            $result.blocked = $true
+            $result.error = "Dry run: the write was intercepted, so the setting still reads '$state'."
+        } else {
+            $result.error = "Read back '$state' after the write (expected '$([bool]$on)')."
+        }
+    }
+    return $result
+}
+
 function Get-SystemAudit {
     # Perf: the two slow WMI calls here used to be Win32_Processor (~1.0 s,
     # only for LoadPercentage) and Win32_OperatingSystem (~0.3 s, only for
@@ -489,52 +643,6 @@ function Get-SystemAudit {
         }
     }
 
-    # HAGS
-    $hagsKey = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
-    $hagsVal = (Get-ItemProperty $hagsKey -Name "HwSchMode" -ErrorAction SilentlyContinue).HwSchMode
-    $isHagsActive = ($hagsVal -eq 2)
-
-    # Windows 11 Flip Optimizations (on by default - missing value means enabled)
-    $dxKey = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
-    $autoOpt = (Get-ItemProperty $dxKey -Name "AutoOptimizationsEnabled" -ErrorAction SilentlyContinue).AutoOptimizationsEnabled
-    $isGameOptActive = (($null -eq $autoOpt) -or ($autoOpt -eq 1))
-
-    # BCD Timers
-    $bcd = (bcdedit /enum "{current}" 2>$null) | Out-String
-    $dynamicTick = ($bcd -match "disabledynamictick\s+Yes")
-    $platformTick = ($bcd -match "useplatformtick\s+Yes")
-
-    # Kernel RAM lock (DisablePagingExecutive)
-    $mmKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
-    $pagingExec = (Get-ItemProperty $mmKey -Name "DisablePagingExecutive" -ErrorAction SilentlyContinue).DisablePagingExecutive
-    $isKernelLocked = ($pagingExec -eq 1)
-
-    # Multimedia and Network Throttling
-    $mmProfile = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
-    $netThrottle = (Get-ItemProperty $mmProfile -Name "NetworkThrottlingIndex" -ErrorAction SilentlyContinue).NetworkThrottlingIndex
-    # NetworkThrottlingIndex is a DWORD and reads back unsigned as 4294967295.
-    # The old check was `-eq -1 -or -eq 0xffffffff`, but PowerShell 5.1 parses
-    # 0xffffffff as Int32 -1, so BOTH comparisons were False against 4294967295.
-    # The value was applied yet reported as off, so the UI toggle snapped back to
-    # OFF even though throttling was disabled. Widen to Int64 and compare the
-    # real unsigned value. A missing value becomes 0, which correctly reads as
-    # "not disabled".
-    $isThrottleDisabled = ((([int64]$netThrottle) -eq 4294967295) -or (([int64]$netThrottle) -eq -1))
-
-    # Power Scheme
-    $activePlan = (powercfg /getactivescheme 2>$null)
-    $isUltimatePower = ($activePlan -match "Ultimate Performance|High performance|Hybred")
-
-    # GameDVR
-    $dvr = (Get-ItemProperty "HKCU:\System\GameConfigStore" -Name "GameDVR_Enabled" -ErrorAction SilentlyContinue).GameDVR_Enabled
-    $isDvrDisabled = ($dvr -eq 0)
-
-    # Delivery Optimization P2P
-    $doMode = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization" -Name "DODownloadMode" -ErrorAction SilentlyContinue).DODownloadMode
-    # 99 or 0 both mean "not using Delivery Optimization". Any other value, including
-    # absent, means the default (1 = LAN) or a bypass mode is in effect.
-    $isDoDisabled = ($doMode -eq 99 -or $doMode -eq 0)
-
     # Total active processes count (reuse the $cpu query above - one WMI round-trip)
     $procCount = (Get-Process -ErrorAction SilentlyContinue).Count
     $cpuLoadVal = Get-CpuLoadSample
@@ -545,66 +653,8 @@ function Get-SystemAudit {
     }
     # No fabricated default: an unreadable CPU load is reported as unknown, not as 6%.
 
-    # --- Extended gaming/OS audit (all reversible, all exposed as toggles) ---
-    $gameBarProps = Get-ItemProperty "HKCU:\SOFTWARE\Microsoft\GameBar" -ErrorAction SilentlyContinue
-    $gameBarAuto = if ($null -ne $gameBarProps -and $null -ne $gameBarProps.AutoGameModeEnabled) { $gameBarProps.AutoGameModeEnabled } else { $gameBarProps.AllowAutoGameMode }
-    # Game Mode is on by default - a missing value means enabled, not disabled
-    $isGameMode = (($null -eq $gameBarAuto) -or ($gameBarAuto -eq 1))
-
-    $transparency = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -ErrorAction SilentlyContinue).EnableTransparency
-    $isTransparencyOff = ($transparency -eq 0)
-
-    $menuDelay = (Get-ItemProperty "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -ErrorAction SilentlyContinue).MenuShowDelay
-    $isMenuFast = ($menuDelay -eq "0")
-
-    $mouseSpeed = (Get-ItemProperty "HKCU:\Control Panel\Mouse" -Name "MouseSpeed" -ErrorAction SilentlyContinue).MouseSpeed
-    $isPrecisionOff = ($mouseSpeed -eq "0")
-
-    $mmAgent = Get-MMAgent -ErrorAction SilentlyContinue
-    # The property is MemoryCompression. There is no MemoryCompressionEnabled -
-    # referencing it returned $null, and `$null -eq $false` is FALSE, so this probe
-    # always reported "not decompressed" and the Disable Memory Compression switch
-    # could never show ON even when compression really was off. The Set-TweakState
-    # branch for this same id read the correct property, so the file disagreed with
-    # itself: the write verified correctly while the switch display never did.
-    # Same reasoning as cpuBoost: an unreadable MMAgent is unknown, not "compression on".
-    $isMemDecompressed = if ($null -ne $mmAgent) { ($mmAgent.MemoryCompression -eq $false) } else { $null }
-
-    $cpuMinAc = Get-PowerAcValue "SUB_PROCESSOR" "PROCTHROTTLEMIN"
-    $cpuMaxAc = Get-PowerAcValue "SUB_PROCESSOR" "PROCTHROTTLEMAX"
-    # powercfg can fail to answer, and "no answer" is not the same claim as "boost is
-    # capped for background work" - that distinction is why this can now be $null.
-    $isCpuBoost = if ($null -ne $cpuMinAc -and $null -ne $cpuMaxAc) { ($cpuMinAc -eq 100 -and $cpuMaxAc -eq 100) } else { $null }
-
     $gpuNames = @($gpus | ForEach-Object { $_.Name })
     $hasNvidia = [bool]($gpuNames -match "NVIDIA")
-    $nvidiaRid = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\nvlddmkm\FTS" -Name "EnableRID61684" -ErrorAction SilentlyContinue).EnableRID61684
-    $isNvidiaRid = ($hasNvidia -and ($nvidiaRid -eq 1))
-
-    # --- Custom (non-registry) audits ---
-    $isHiberOff = -not (Test-Path "$env:SystemDrive\hiberfil.sys")
-
-    # NetBIOS is a per-adapter setting, so it has to be read off the adapter this audit is
-    # describing. This took the first IP-enabled adapter WMI happened to list, which on a
-    # machine with a VPN or a second NIC is often a different one - so the switch showed
-    # that other adapter's NetBIOS state and the write then changed that other adapter.
-    $primaryNic = Get-PrimaryAdapter
-    $nbtOpts = $null
-    if ($primaryNic) {
-        $nbtOpts = (Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex=$($primaryNic.InterfaceIndex)" -ErrorAction SilentlyContinue).TcpipNetbiosOptions
-    }
-    $isNbtOff = ($nbtOpts -eq 2)
-
-    # A failed netsh produces no output at all, and a regex that finds no match in an
-    # empty string is not evidence that the tunnel is enabled - so empty output is $null
-    # (rendered as a dash) rather than a confident "not disabled".
-    $teredoOut = ((& netsh.exe interface teredo show state 2>$null) | Out-String)
-    $isTeredoOff = if ($teredoOut.Trim().Length -gt 0) { [bool]($teredoOut -match '(State|Type)\s*:\s*disabled') } else { $null }
-    $isatapOut = ((& netsh.exe interface isatap show state 2>$null) | Out-String)
-    $isIsatapOff = if ($isatapOut.Trim().Length -gt 0) { [bool]($isatapOut -match '(State|Type)\s*:\s*disabled') } else { $null }
-    $sitoOut = ((& netsh.exe interface 6to4 show state 2>$null) | Out-String)
-    $is6to4Off = if ($sitoOut.Trim().Length -gt 0) { [bool]($sitoOut -match '(State|Type)\s*:\s*disabled') } else { $null }
-
     # "Telemetry Disabled" and "Debloated" are claims about this machine, so they are read
     # from the services rather than remembered, and from the same curated list the debloat
     # action writes to - so the badge and the Services tab can never disagree about what
@@ -616,29 +666,42 @@ function Get-SystemAudit {
     $bloatOn = @($bloatLive | Where-Object { "$($_.StartType)" -ne "Disabled" })
     $telemetryOn = @($bloatOn | Where-Object { (Get-ServiceGroupName $_.Name) -eq "telemetry" })
 
+    # Every static "is it applied" flag comes from Get-StaticTweakStates - one
+    # definition shared with the write path, so this payload and a write's
+    # read-back cannot disagree.
+    $staticStates = Get-StaticTweakStates -GpuNames $gpuNames
+
     $tweakBase = @{
-        hags = $isHagsActive
-        gameOptimizations = $isGameOptActive
-        dynamicTickDisabled = $dynamicTick
-        platformTick = $platformTick
-        kernelRamLock = $isKernelLocked
-        networkThrottlingDisabled = $isThrottleDisabled
-        gameDvrDisabled = $isDvrDisabled
-        deliveryOptimizationDisabled = $isDoDisabled
-        ultimatePowerPlan = $isUltimatePower
-        gameMode = $isGameMode
-        transparencyOff = $isTransparencyOff
-        menuFast = $isMenuFast
-        precisionOff = $isPrecisionOff
-        memDecompressed = $isMemDecompressed
-        cpuBoost = $isCpuBoost
-        nvidiaRid = $isNvidiaRid
+        hags = $staticStates.hags
+        gameOptimizations = $staticStates.gameOpt
+        dynamicTickDisabled = $staticStates.dynamicTick
+        platformTick = $staticStates.platformTick
+        kernelRamLock = $staticStates.kernelRamLock
+        networkThrottlingDisabled = $staticStates.netThrottle
+        gameDvrDisabled = $staticStates.gameDvr
+        deliveryOptimizationDisabled = $staticStates.deliveryOpt
+        ultimatePowerPlan = $staticStates.powerPlan
+        gameMode = $staticStates.gameMode
+        transparencyOff = $staticStates.transparency
+        menuFast = $staticStates.menuDelay
+        precisionOff = $staticStates.mousePrecision
+        memDecompressed = $staticStates.memCompression
+        cpuBoost = $staticStates.cpuBoost
+        nvidiaRid = $staticStates.nvidiaRid
         nvidiaAvailable = $hasNvidia
-        hibernate = $isHiberOff
-        netbios = $isNbtOff
-        teredo = $isTeredoOff
-        isatap = $isIsatapOff
-        sixtofour = $is6to4Off
+        hibernate = $staticStates.hibernate
+        netbios = $staticStates.netbios
+        teredo = $staticStates.teredo
+        isatap = $staticStates.isatap
+        sixtofour = $staticStates.sixtofour
+        # The TCP registry / QoS / ephemeral-port switches were the last ones whose
+        # success the server asserted without reading anything. Reading them here
+        # means their write path verifies against this same source.
+        tcpNoDelay = $staticStates.tcpNoDelay
+        tcpAckFreq = $staticStates.tcpAckFreq
+        rss = $staticStates.rss
+        qosLimit = $staticStates.qosLimit
+        tcpPorts = $staticStates.tcpPorts
         # Computed, not asserted (see the note above the bloat probe). These drive the
         # dashboard's "Telemetry Disabled" line and "Debloated" badge.
         debloated = $(if ($bloatKnown) { $bloatOn.Count -eq 0 } else { $null })
@@ -1607,7 +1670,11 @@ function Apply-NetworkTweaks {
     $log = @()
     $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" -and $_.Virtual -ne $true } | Select-Object -First 1
     if (-not $adapter) { $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Select-Object -First 1 }
-    $adapterName = if ($adapter) { $adapter.Name } else { "Ethernet" }
+    if (-not $adapter) {
+        $log += "[FAIL] No network adapter found - nothing applied. This routine used to point netsh and DNS at an interface name it invented, which left the machine untouched while the log read like a success."
+        return @{ success = $false; logs = $log }
+    }
+    $adapterName = $adapter.Name
     $adapterGuid = $adapter.InterfaceGuid
 
     $log += "Target Adapter: $adapterName ($($adapter.InterfaceDescription))"
@@ -1963,38 +2030,49 @@ function Set-TweakState($id, $enabled, $value) {
             return @{ success = $false; id = $id; error = "This setting takes a value, not an on/off" }
         }
         $written = Set-RegTweakValue -def $def -value $value
+        # Read back instead of trusting the write. "unset" legitimately reads back
+        # as $null (both sides are $null then, which compares equal); a value that
+        # did not land compares unequal and reports as a failure.
         $actual = Get-RegTweakValue -def $def
-        if ($null -eq $actual) { return @{ success = $true; id = $id; value = $null; reboot = [bool]$def.reboot } }
-        return @{ success = ($actual -eq $written); id = $id; value = $actual; reboot = [bool]$def.reboot }
+        if ("$actual" -eq "$written") { return @{ success = $true; id = $id; value = $actual; reboot = [bool]$def.reboot } }
+        $result = @{ success = $false; id = $id; value = $actual; reboot = [bool]$def.reboot; error = "Read back '$actual' after writing '$written'." }
+        if ($DryRun) { $result.blocked = $true; $result.error = "Dry run: the write was intercepted, so the setting still reads '$actual'." }
+        return $result
     }
     if ($def) {
         Set-RegTweak -def $def -on $on
-        return @{ success = $true; id = $id; enabled = $on; reboot = [bool]$def.reboot }
+        # Read back through the same getter the audit uses, so the switch and the
+        # dashboard cannot disagree about whether this entry is applied.
+        $after = Get-RegTweakState $def
+        if ($after -eq [bool]$on) { return @{ success = $true; id = $id; enabled = [bool]$on; reboot = [bool]$def.reboot } }
+        $result = @{ success = $false; id = $id; enabled = $after; reboot = [bool]$def.reboot; error = "Read back '$after' after the write (expected '$([bool]$on)')." }
+        if ($DryRun) { $result.blocked = $true; $result.error = "Dry run: the write was intercepted, so the setting still reads '$after'." }
+        return $result
     }
     switch ($id) {
         "hags" {
             Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "HwSchMode" -Value $(if ($on) { 2 } else { 1 }) -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-            return @{ success = $true; id = $id; enabled = $on; reboot = $true }
+            return Get-TweakWriteResult -id $id -on $on -Reboot
         }
         "gameOpt" {
             $dxPath = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
             if (-not (Test-Path $dxPath)) { New-Item -Path $dxPath -Force -ErrorAction SilentlyContinue | Out-Null }
             Set-ItemProperty -Path $dxPath -Name "AutoOptimizationsEnabled" -Value $(if ($on) { 1 } else { 0 }) -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-            return @{ success = $true; id = $id; enabled = $on }
+            return Get-TweakWriteResult -id $id -on $on
         }
         "dynamicTick" {
             if ($on) { & bcdedit.exe /set disabledynamictick yes 2>$null | Out-Null }
             else { & bcdedit.exe /deletevalue disabledynamictick 2>$null | Out-Null }
-            return @{ success = $true; id = $id; enabled = $on; reboot = $true }
+            return Get-TweakWriteResult -id $id -on $on -Reboot
         }
         "platformTick" {
             if ($on) { & bcdedit.exe /set useplatformtick yes 2>$null | Out-Null }
             else { & bcdedit.exe /deletevalue useplatformtick 2>$null | Out-Null }
-            return @{ success = $true; id = $id; enabled = $on; reboot = $true }
+            return Get-TweakWriteResult -id $id -on $on -Reboot
         }
         "kernelRamLock" {
             Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "DisablePagingExecutive" -Value $(if ($on) { 1 } else { 0 }) -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-            return @{ success = $true; id = $id; enabled = $on; reboot = $true }
+            return Get-TweakWriteResult -id $id -on $on -Reboot
         }
         "netThrottle" {
             $mmProfile = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
@@ -2013,7 +2091,7 @@ function Set-TweakState($id, $enabled, $value) {
             } else {
                 Set-ItemProperty -Path $mmProfile -Name "NetworkThrottlingIndex" -Value 10 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
             }
-            return @{ success = $true; id = $id; enabled = $on }
+            return Get-TweakWriteResult -id $id -on $on
         }
         "gameDvr" {
             $gcsPath = "HKCU:\System\GameConfigStore"
@@ -2022,7 +2100,7 @@ function Set-TweakState($id, $enabled, $value) {
             $gdvrPolicy = "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR"
             if (-not (Test-Path $gdvrPolicy)) { New-Item -Path $gdvrPolicy -Force -ErrorAction SilentlyContinue | Out-Null }
             Set-ItemProperty -Path $gdvrPolicy -Name "AppCaptureEnabled" -Value $(if ($on) { 0 } else { 1 }) -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-            return @{ success = $true; id = $id; enabled = $on }
+            return Get-TweakWriteResult -id $id -on $on
         }
         "deliveryOpt" {
             $doPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"
@@ -2035,7 +2113,7 @@ function Set-TweakState($id, $enabled, $value) {
             } else {
                 Remove-ItemProperty -Path $doPath -Name "DODownloadMode" -ErrorAction SilentlyContinue
             }
-            return @{ success = $true; id = $id; enabled = $on }
+            return Get-TweakWriteResult -id $id -on $on
         }
         "tcpNoDelay" {
             $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" -and $_.Virtual -ne $true } | Select-Object -First 1
@@ -2050,7 +2128,7 @@ function Set-TweakState($id, $enabled, $value) {
                     Remove-ItemProperty -Path $tcpReg -Name "TcpDelAckTicks" -ErrorAction SilentlyContinue
                 }
             }
-            return @{ success = $true; id = $id; enabled = $on; reboot = $true }
+            return Get-TweakWriteResult -id $id -on $on -Reboot
         }
     "tcpAckFreq" {
         $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" -and $_.Virtual -ne $true } | Select-Object -First 1
@@ -2068,10 +2146,9 @@ function Set-TweakState($id, $enabled, $value) {
         } else {
             Remove-ItemProperty -Path $tcpReg -Name "TcpAckFrequency" -ErrorAction SilentlyContinue
         }
-        # Read back and report what is actually true, not what was requested.
-        $ackRead = (Get-ItemProperty -Path $tcpReg -Name "TcpAckFrequency" -ErrorAction SilentlyContinue).TcpAckFrequency
-        $nowOn = ($null -ne $ackRead -and $ackRead -eq 1)
-        return @{ success = ($nowOn -eq $on); id = $id; enabled = $nowOn; reboot = $true }
+        # Same read-back, now through the shared state function so this and the
+        # audit agree on what "already off" looks like.
+        return Get-TweakWriteResult -id $id -on $on -Reboot
     }
         "rss" {
             # ON  = enable RSS (improves multi-core NIC throughput)
@@ -2079,8 +2156,7 @@ function Set-TweakState($id, $enabled, $value) {
             #       but if the user explicitly turns this off they want it off)
             if ($on) { & netsh.exe int tcp set global rss=enabled 2>$null | Out-Null }
             else { & netsh.exe int tcp set global rss=disabled 2>$null | Out-Null }
-            $rssNow = (Get-NetAdapterRss -ErrorAction SilentlyContinue | Where-Object { $null -ne $_.Enabled } | Select-Object -First 1).Enabled
-            return @{ success = $true; id = $id; enabled = $on; rss = $rssNow }
+            return Get-TweakWriteResult -id $id -on $on
         }
     "powerPlan" {
         # Hybred preferred; falls back to Ultimate, then High performance. See
@@ -2098,7 +2174,7 @@ function Set-TweakState($id, $enabled, $value) {
             return @{ success = $false; id = $id; error = "No Hybred / Ultimate / High performance scheme present" }
         } else {
             & powercfg.exe /setactive 381b4222-f694-41f0-9685-ff5bb260df2e 2>$null | Out-Null
-            return @{ success = $true; id = $id; enabled = $false }
+            return Get-TweakWriteResult -id $id -on $false
         }
     }
         "gameMode" {
@@ -2107,17 +2183,17 @@ function Set-TweakState($id, $enabled, $value) {
             $val = if ($on) { 1 } else { 0 }
             Set-ItemProperty -Path $gbPath -Name "AllowAutoGameMode" -Value $val -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
             Set-ItemProperty -Path $gbPath -Name "AutoGameModeEnabled" -Value $val -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-            return @{ success = $true; id = $id; enabled = $on }
+            return Get-TweakWriteResult -id $id -on $on
         }
         "transparency" {
             $tpPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
             if (-not (Test-Path $tpPath)) { New-Item -Path $tpPath -Force -ErrorAction SilentlyContinue | Out-Null }
             Set-ItemProperty -Path $tpPath -Name "EnableTransparency" -Value $(if ($on) { 0 } else { 1 }) -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-            return @{ success = $true; id = $id; enabled = $on }
+            return Get-TweakWriteResult -id $id -on $on
         }
         "menuDelay" {
             Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -Value $(if ($on) { "0" } else { "400" }) -Type String -Force -ErrorAction SilentlyContinue | Out-Null
-            return @{ success = $true; id = $id; enabled = $on }
+            return Get-TweakWriteResult -id $id -on $on
         }
         "mousePrecision" {
             $mPath = "HKCU:\Control Panel\Mouse"
@@ -2130,18 +2206,14 @@ function Set-TweakState($id, $enabled, $value) {
                 Set-ItemProperty -Path $mPath -Name "MouseThreshold1" -Value "6" -Type String -Force -ErrorAction SilentlyContinue | Out-Null
                 Set-ItemProperty -Path $mPath -Name "MouseThreshold2" -Value "10" -Type String -Force -ErrorAction SilentlyContinue | Out-Null
             }
-            return @{ success = $true; id = $id; enabled = $on }
+            return Get-TweakWriteResult -id $id -on $on
         }
         "memCompression" {
             if ($on) { Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue | Out-Null }
             else { Enable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue | Out-Null }
-            # Read back rather than return success unconditionally: both MMAgent
-            # calls fail silently here, and $on means "tweak on" = compression OFF.
-            $mmNow = (Get-MMAgent -ErrorAction SilentlyContinue).MemoryCompression
-            $applied = if ($on) { $mmNow -eq $false } else { $mmNow -eq $true }
-            if ($applied) { return @{ success = $true; id = $id; enabled = $on; reboot = $true } }
-            $want = if ($on) { "disabled" } else { "enabled" }
-            return @{ success = $false; id = $id; enabled = $on; reboot = $true; error = "MemoryCompression read back as '$mmNow' after the change (expected $want)." }
+            # Both MMAgent calls fail silently here, so read back through the
+            # shared state function - $on means "tweak on" = compression OFF.
+            return Get-TweakWriteResult -id $id -on $on -Reboot
         }
         "cpuBoost" {
             if ($on) {
@@ -2156,11 +2228,11 @@ function Set-TweakState($id, $enabled, $value) {
                 & powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100 2>$null | Out-Null
             }
             & powercfg.exe /setactive SCHEME_CURRENT 2>$null | Out-Null
-            return @{ success = $true; id = $id; enabled = $on }
+            return Get-TweakWriteResult -id $id -on $on
         }
         "nvidiaRid" {
             $nv = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "NVIDIA" }
-            if (-not $nv) { return @{ success = $false; error = "No NVIDIA GPU detected" } }
+            if (-not $nv) { return @{ success = $false; id = $id; error = "No NVIDIA GPU detected" } }
             $fts = "HKLM:\SYSTEM\CurrentControlSet\Services\nvlddmkm\FTS"
             if ($on) {
                 if (-not (Test-Path $fts)) { New-Item -Path $fts -Force -ErrorAction SilentlyContinue | Out-Null }
@@ -2168,7 +2240,7 @@ function Set-TweakState($id, $enabled, $value) {
             } else {
                 Remove-ItemProperty -Path $fts -Name "EnableRID61684" -ErrorAction SilentlyContinue
             }
-            return @{ success = $true; id = $id; enabled = $on; reboot = $true }
+            return Get-TweakWriteResult -id $id -on $on -Reboot
         }
         "qosLimit" {
             $qosPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Psched"
@@ -2178,7 +2250,7 @@ function Set-TweakState($id, $enabled, $value) {
             } else {
                 Remove-ItemProperty -Path $qosPath -Name "NonBestEffortLimit" -ErrorAction SilentlyContinue
             }
-            return @{ success = $true; id = $id; enabled = $on }
+            return Get-TweakWriteResult -id $id -on $on
         }
         "tcpPorts" {
             $tcpParams = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
@@ -2189,33 +2261,43 @@ function Set-TweakState($id, $enabled, $value) {
                 Remove-ItemProperty -Path $tcpParams -Name "MaxUserPort" -ErrorAction SilentlyContinue
                 Remove-ItemProperty -Path $tcpParams -Name "TcpTimedWaitDelay" -ErrorAction SilentlyContinue
             }
-            return @{ success = $true; id = $id; enabled = $on; reboot = $true }
+            return Get-TweakWriteResult -id $id -on $on -Reboot
         }
         "hibernate" {
             if ($on) { & powercfg.exe /hibernate off 2>$null | Out-Null }
             else { & powercfg.exe /hibernate on 2>$null | Out-Null }
-            return @{ success = $true; id = $id; enabled = $on }
+            return Get-TweakWriteResult -id $id -on $on
         }
         "netbios" {
-            $cfg = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $cfg) { return @{ success = $false; error = "No active network adapter found" } }
+            # Target the adapter the audit reads and the dashboard shows. This used
+            # to take the first IPEnabled adapter WMI happened to list, so on a
+            # machine with a VPN or a second NIC the write landed on an adapter the
+            # switch was not describing.
+            $primary = Get-PrimaryAdapter
+            $cfg = $null
+            if ($primary) {
+                $cfg = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex=$($primary.InterfaceIndex)" -ErrorAction SilentlyContinue
+            }
+            if (-not $cfg) { return @{ success = $false; id = $id; error = "No active network adapter found" } }
             Invoke-CimMethod -InputObject $cfg -MethodName SetTcpipNetbios -Arguments @{ TcpipNetbiosOptions = $(if ($on) { 2 } else { 0 }) } -ErrorAction SilentlyContinue | Out-Null
-            return @{ success = $true; id = $id; enabled = $on; reboot = $true }
+            $result = Get-TweakWriteResult -id $id -on $on -Reboot
+            if ($result.success) { $result.adapter = $primary.Name }
+            return $result
         }
         "teredo" {
             if ($on) { & netsh.exe interface teredo set state disabled 2>$null | Out-Null }
             else { & netsh.exe interface teredo set state default 2>$null | Out-Null }
-            return @{ success = $true; id = $id; enabled = $on }
+            return Get-TweakWriteResult -id $id -on $on
         }
         "isatap" {
             if ($on) { & netsh.exe interface isatap set state disabled 2>$null | Out-Null }
             else { & netsh.exe interface isatap set state default 2>$null | Out-Null }
-            return @{ success = $true; id = $id; enabled = $on }
+            return Get-TweakWriteResult -id $id -on $on
         }
         "sixtofour" {
             if ($on) { & netsh.exe interface 6to4 set state disabled 2>$null | Out-Null }
             else { & netsh.exe interface 6to4 set state default 2>$null | Out-Null }
-            return @{ success = $true; id = $id; enabled = $on }
+            return Get-TweakWriteResult -id $id -on $on
         }
         default {
             return @{ success = $false; error = "Unknown tweak id: $id" }
@@ -2270,11 +2352,16 @@ function Set-ServiceState($name, $optimize) {
     # UI as a completed change. Start type is the value this function sets, so
     # that is what gets compared.
     if ("$($after.StartType)" -ne $wantStart) {
-        return @{
+        $result = @{
             success = $false
             name = $name
             error = "Start type is '$($after.StartType)', expected '$wantStart'. The Service Control Manager refused the change - this normally means the app is not running as Administrator."
         }
+        if ($DryRun) {
+            $result.blocked = $true
+            $result.error = "Dry run: sc.exe was intercepted, so the start type is still '$($after.StartType)' (expected '$wantStart')."
+        }
+        return $result
     }
     return @{ success = $true; name = $name; optimized = [bool]$optimize; status = "$($after.Status)"; startType = "$($after.StartType)" }
 }
