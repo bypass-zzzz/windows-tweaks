@@ -127,7 +127,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 // js/themes.js + the inline snippet in index.html (no flash of the wrong theme).
 // -----------------------------------------------------------------------------
 const SVG_NS = "http://www.w3.org/2000/svg";
-const WHEEL_GEO = { cx: 280, cy: 280, rOut: 252, rIn: 150, gapDeg: 1.6 };
+const WHEEL_GEO = { cx: 280, cy: 280, rOut: 252, rIn: 168, gapDeg: 2.0 };
 
 const wheelState = { built: false, open: false, index: 0, segs: [], lastFocus: null };
 
@@ -137,6 +137,12 @@ function wheelPoint(radius, angleDeg) {
         x: (WHEEL_GEO.cx + radius * Math.cos(a)).toFixed(2),
         y: (WHEEL_GEO.cy + radius * Math.sin(a)).toFixed(2)
     };
+}
+
+function wheelGlow(hexColor, alpha) {
+    const h = String(hexColor).replace("#", "");
+    const n = parseInt(h.length === 3 ? h.split("").map((c) => c + c).join("") : h, 16);
+    return "rgba(" + ((n >> 16) & 255) + ", " + ((n >> 8) & 255) + ", " + (n & 255) + ", " + alpha + ")";
 }
 
 function themeIndexOf(id) {
@@ -169,9 +175,13 @@ function previewTheme(index) {
     wheelState.segs.forEach((seg, i) => seg.classList.toggle("is-hot", i === wheelState.index));
     const name = document.getElementById("wheelName");
     const hexEl = document.getElementById("wheelHex");
+    const action = document.getElementById("wheelAction");
     const swatches = document.querySelectorAll("#wheelSwatches i");
     if (name) name.textContent = theme.name;
     if (hexEl) hexEl.textContent = theme.primary + " · " + theme.accent;
+    if (action) action.textContent = theme.id === WTTheme.current() ? "Current theme" : "Click to apply";
+    const center = document.querySelector(".wheel-center");
+    if (center) center.style.setProperty("--wheel-glow", wheelGlow(theme.highlight, 0.26));
     if (swatches.length === 2) {
         swatches[0].style.background = theme.primary;
         swatches[1].style.background = theme.accent;
@@ -210,8 +220,9 @@ function buildThemeWheel() {
             " L " + p3.x + " " + p3.y +
             " A " + WHEEL_GEO.rIn + " " + WHEEL_GEO.rIn + " 0 0 0 " + p4.x + " " + p4.y + " Z";
 
-        // One gradient per wedge: shell at the inner edge, highlight at the
-        // outer — the wedge literally previews the theme's authored pair.
+        // One gradient per wedge: the pair's dark tone at the inner edge,
+        // the highlight through the body, and a lifted gloss on the outer rim
+        // — the ramp that reads as depth instead of a flat crayon stroke.
         const gid = "wg-" + theme.id;
         const gi = wheelPoint(WHEEL_GEO.rIn + 8, mid);
         const go = wheelPoint(WHEEL_GEO.rOut - 6, mid);
@@ -220,19 +231,36 @@ function buildThemeWheel() {
         gradient.setAttribute("gradientUnits", "userSpaceOnUse");
         gradient.setAttribute("x1", gi.x); gradient.setAttribute("y1", gi.y);
         gradient.setAttribute("x2", go.x); gradient.setAttribute("y2", go.y);
-        const stopA = document.createElementNS(SVG_NS, "stop");
-        stopA.setAttribute("offset", "0"); stopA.setAttribute("stop-color", theme.shell);
-        const stopB = document.createElementNS(SVG_NS, "stop");
-        stopB.setAttribute("offset", "1"); stopB.setAttribute("stop-color", theme.highlight);
-        gradient.appendChild(stopA);
-        gradient.appendChild(stopB);
+        const stops = [
+            [0, theme.core],
+            [0.52, theme.highlight],
+            [1, theme.gloss]
+        ];
+        stops.forEach(([offset, color]) => {
+            const stop = document.createElementNS(SVG_NS, "stop");
+            stop.setAttribute("offset", String(offset));
+            stop.setAttribute("stop-color", color);
+            gradient.appendChild(stop);
+        });
         defs.appendChild(gradient);
 
         const seg = document.createElementNS(SVG_NS, "path");
         seg.setAttribute("d", d);
         seg.setAttribute("fill", "url(#" + gid + ")");
+        // Same-paint stroke with a round join softens every corner — the
+        // difference between "painted shard" and "cut glass".
+        seg.setAttribute("stroke", "url(#" + gid + ")");
+        seg.setAttribute("stroke-width", "2.5");
+        seg.setAttribute("stroke-linejoin", "round");
+        // Real translucency: the blurred app stays faintly visible through the
+        // colour instead of a matte fill sitting on top of it.
+        seg.setAttribute("fill-opacity", "0.78");
+        seg.setAttribute("stroke-opacity", "0.85");
         seg.setAttribute("class", "wheel-seg");
         seg.dataset.themeId = theme.id;
+        // Each wedge carries its own colour as a glow token so hover/hot
+        // states light up in the theme's colour instead of a generic white.
+        seg.style.setProperty("--seg-glow", wheelGlow(theme.highlight, 0.5));
         seg.addEventListener("mouseenter", () => previewTheme(i));
         seg.addEventListener("click", () => {
             applyThemeById(theme.id, true);

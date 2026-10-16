@@ -870,22 +870,38 @@
     <!-- TOAST CONTAINER -->
     <div class="toast-container" id="toastContainer"></div>
 
-    <!-- THEME WHEEL — radial picker. Wedges are drawn at runtime from the
-         theme list in js/themes.js; this markup is only the shell. -->
+    <!-- THEME WHEEL — radial picker. The bed / sheen / rims are static glass
+         furniture; the wedges are drawn at runtime from the theme list in
+         js/themes.js. -->
     <div id="themeWheel" class="wheel-overlay" hidden>
         <div class="wheel-panel" id="wheelPanel" role="dialog" aria-modal="true"
              aria-label="Choose a theme. Arrow keys cycle, Enter applies, Escape closes." tabindex="-1">
             <svg class="wheel-graph" viewBox="0 0 560 560" aria-hidden="true">
-                <defs id="wheelDefs"></defs>
+                <defs id="wheelDefs">
+                    <linearGradient id="wheelSheen" x1="0" y1="0" x2="0.35" y2="1">
+                        <stop offset="0" stop-color="rgba(255,255,255,0.12)"/>
+                        <stop offset="0.30" stop-color="rgba(255,255,255,0.03)"/>
+                        <stop offset="0.58" stop-color="rgba(255,255,255,0)"/>
+                        <stop offset="0.86" stop-color="rgba(255,255,255,0.02)"/>
+                        <stop offset="1" stop-color="rgba(255,255,255,0.08)"/>
+                    </linearGradient>
+                </defs>
+                <circle class="wheel-bed" cx="280" cy="280" r="264"></circle>
                 <g id="wheelSegs"></g>
+                <path class="wheel-sheen" fill-rule="evenodd" fill="url(#wheelSheen)"
+                      d="M 280 28 A 252 252 0 1 0 280 532 A 252 252 0 1 0 280 28 Z
+                         M 280 112 A 168 168 0 1 0 280 448 A 168 168 0 1 0 280 112 Z"></path>
+                <circle class="wheel-rim" cx="280" cy="280" r="252"></circle>
+                <circle class="wheel-rim is-inner" cx="280" cy="280" r="168"></circle>
             </svg>
             <div class="wheel-center" aria-hidden="true">
                 <div class="wheel-swatches" id="wheelSwatches"><i></i><i></i></div>
                 <div class="wheel-name" id="wheelName">Monochrome</div>
                 <div class="wheel-hex" id="wheelHex">#ffffff · #000000</div>
+                <div class="wheel-action" id="wheelAction">Current theme</div>
             </div>
             <button class="wheel-close" id="wheelClose" type="button" aria-label="Close theme picker">✕</button>
-            <div class="wheel-hint">Esc to close · click a wedge to apply</div>
+            <div class="wheel-hint">Click to apply · Esc to close</div>
         </div>
     </div>
 

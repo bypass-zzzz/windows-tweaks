@@ -212,10 +212,17 @@
         list: function () {
             return THEMES.map(function (t) {
                 var c = themed(t);
+                var shell = t.mono ? BLACK : c.shell;
+                var hi = t.mono ? WHITE : c.hi;
                 return {
                     id: t.id, name: t.name, primary: t.primary, accent: t.accent,
-                    shell: t.mono ? "#000000" : hex(c.shell),
-                    highlight: t.mono ? "#ffffff" : hex(c.hi)
+                    shell: hex(shell),
+                    highlight: hex(hi),
+                    /* Wheel-only tones: `core` keeps the pair's dark end visible
+                       at the wedge's inner edge, `gloss` is the specular outer
+                       rim that gives the glass its lit edge. */
+                    core: hex(mix(shell, hi, 0.32)),
+                    gloss: hex(lighten(hi, 0.30))
                 };
             });
         },
