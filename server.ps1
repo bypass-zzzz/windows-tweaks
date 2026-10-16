@@ -1226,7 +1226,7 @@ $script:RegTweaks = @(
     @{ id="lockAds"; category="System"; label="Disable Lock Screen Ads"; desc="Kills spotlight promos and fun-fact overlays on the lock screen."; path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"; values=@(@{name="RotatingLockScreenEnabled";type="DWord";on=0;off="__REMOVE__"}, @{name="RotatingLockScreenOverlayEnabled";type="DWord";on=0;off="__REMOVE__"}, @{name="SubscribedContent-338387Enabled";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$false },
     @{ id="timerResolution"; category="System"; label="Allow Global Timer Resolution Requests"; desc="Lets applications that ask for a high-resolution system timer actually get one, instead of Windows clamping them to the default 15.6ms tick. It does NOT raise the tick on its own - a program has to request it."; path="HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel"; values=@(@{name="GlobalTimerResolutionRequests";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="Corrected after review: the old description claimed this forces a 0.5ms timer period, which is false. GlobalTimerResolutionRequests only PERMITS global requests; without a program asking, the resolution does not change. GAMMA caught this. Do NOT enable on a laptop expecting input latency gains - the effect is workload-dependent and usually small, and permitting high-resolution timers costs a little power." ; perf=$true},
         @{ id="mmcsWin32Priority"; category="Gaming"; label="Processor Allocation: Programs vs Background Services"; desc="Win32PrioritySeparation, the first control in the Windows performance dialog. Programs gives foreground apps a much larger share of quantum than background services, which is what you want when gaming. Real, but it only reweights the legacy scheduler quantum - it does not reorder threads outside MMCSS. Windows reads this under Control\PriorityControl, NOT under Multimedia\SystemProfile, so that is where it is written; an earlier version wrote a copy under SystemProfile that Windows ignored entirely."; path="HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"; type="enum"; valueName="Win32PrioritySeparation"; options=@(@{v=38;l="Programs - 0x26 (recommended for gaming)"},@{v=24;l="Background services - 0x18"},@{v=18;l="Short background quantum - 0x12"},@{v="unset";l="Windows default (unset)"}); defaultValue=0; reboot=$true; perf=$true; caution="0x26 is also the Windows default, so this only matters if something moved it. This reweights the legacy scheduler quantum only - modern games run at a higher base priority and largely ignore it." },
-    @{ id="mmcsSystemResponsiveness"; category="Gaming"; label="System Responsiveness for Games"; desc="Clears the 20 percent of CPU that MMCSS holds back for multimedia background work, so a game is preempted less. Choose Off - it is the best setting for gaming. This one is a genuine, well-understood MMCSS control rather than folklore."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; type="enum"; valueName="SystemResponsiveness"; options=@(@{v=0;l="Off (recommended)"},@{v=1;l="On"},@{v="unset";l="Windows default (unset - lets Windows decide)"}); defaultValue=0; reboot=$true; perf=$true; caution="Removing the reservation lets media threads take CPU the desktop wanted, which can starve the UI if a decode stalls. If audio ever crackles after setting this to Off, put it back to On or Windows default - that is the first thing to revert." },
+    @{ id="mmcsSystemResponsiveness"; category="Gaming"; label="System Responsiveness for Games"; desc="Clears the CPU share MMCSS holds back for non-multimedia background work, so a game is preempted less. Windows ships this value at 10 on 64-bit Windows and 20 on 32-bit; choosing Off writes 0, which is the best setting for gaming. This one is a genuine, well-understood MMCSS control rather than folklore."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; type="enum"; valueName="SystemResponsiveness"; options=@(@{v=0;l="Off (recommended)"},@{v=1;l="On"},@{v="unset";l="Windows default (unset - lets Windows decide)"}); defaultValue=0; reboot=$true; perf=$true; caution="Removing the reservation lets media threads take CPU the desktop wanted, which can starve the UI if a decode stalls. If audio ever crackles after setting this to Off, put it back to On or Windows default - that is the first thing to revert." },
     @{ id="mmcsCpuPriority"; category="Gaming"; label="CPU Priority for Gaming"; desc="The MMCSS Games task priority, Tasks\Games\Priority. Choose High - 6 on the documented 1 to 8 scale, where 8 is highest. An earlier version wrote a value called Taskscheduler under Multimedia\SystemProfile, which is not a location Windows reads for game scheduling, so it did nothing."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; type="enum"; valueName="Priority"; options=@(@{v=6;l="High - 6 (recommended)"},@{v=8;l="Highest - 8"},@{v=4;l="Medium - 4"},@{v=2;l="Low - 2 (Windows default)"},@{v="unset";l="Windows default (unset)"}); defaultValue=2; reboot=$true; perf=$true; caution="IMPORTANT INTERACTION: this value is ignored entirely while Scheduling Category on this same task is set to High - Microsoft documents that such tasks are always treated as 2. That is the case on a stock machine, so set Scheduling Category above to Medium for this number to take any effect." },
     @{ id="mmcsSchedulingCategory"; category="Gaming"; label="Scheduling Category for Gaming"; desc="Scheduling Category, the MMCSS Games task category. This is NOT a number - it is the text value High, Medium or Low on the Games task. Choose Medium, counterintuitively: Microsoft documents that when Scheduling Category is High the task Priority is always treated as 2, so setting this to High silently cancels out the CPU Priority entry above."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; type="enum"; valueName="Scheduling Category"; valueType="String"; options=@(@{v="Medium";l="Medium (recommended - lets Priority apply)"},@{v="High";l="High - forces Priority to 2"},@{v="Low";l="Low"},@{v="unset";l="Windows default (unset)"}); defaultValue=0; reboot=$true; perf=$true; caution="Text, not a number. Choosing High here undoes the CPU Priority entry: Windows treats any task with a High scheduling category as Priority 2 no matter what Priority says." },
     @{ id="mmcsGpuPriority"; category="Gaming"; label="GPU Priority for Gaming"; desc="The MMCSS Games GPU priority, Tasks\Games\GPU Priority. Choose High - 8 on the documented 0 to 31 scale. An earlier version wrote a value called GPUPriority under Multimedia\SystemProfile, using a signed -2 to 2 scale that Windows does not read; the real value is this one."; path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"; type="enum"; valueName="GPU Priority"; options=@(@{v=8;l="High - 8 (recommended)"},@{v=16;l="Very high - 16"},@{v=4;l="Medium - 4"},@{v=2;l="Low - 2 (Windows default)"},@{v="unset";l="Windows default (unset)"}); defaultValue=2; reboot=$true; perf=$true; caution="Microsoft's public documentation lists this priority as NOT YET USED. That is not the same as unused, though - Microsoft does not document everything, and GPU scheduling is exactly the sort of internal plumbing that gets wired up without appearing in the public docs. No one has measured it either way. What is certain is that it now writes to the correct key with the correct 0 to 31 scale, so it is at least in the right place. Treat it as unverified rather than proven or disproven." },
@@ -1588,12 +1588,21 @@ function Apply-NetworkTweaks {
     # 5. Multimedia / Network Throttling (-1 == 0xFFFFFFFF, same bits, always accepted)
     $mmProfile = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
     Set-ItemProperty -Path $mmProfile -Name "NetworkThrottlingIndex" -Value -1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-    Set-ItemProperty -Path $mmProfile -Name "SystemResponsiveness" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
     $mmRead = Get-ItemProperty -Path $mmProfile -ErrorAction SilentlyContinue
     if ($mmRead.NetworkThrottlingIndex -eq 4294967295 -or $mmRead.NetworkThrottlingIndex -eq -1) { $log += "[OK] NetworkThrottlingIndex = 0xFFFFFFFF (verified)" }
     else { $log += "[FAIL] NetworkThrottlingIndex expected 0xFFFFFFFF, actual '$($mmRead.NetworkThrottlingIndex)'" }
-    if ($mmRead.SystemResponsiveness -eq 0) { $log += "[OK] SystemResponsiveness = 0 (verified)" }
-    else { $log += "[FAIL] SystemResponsiveness expected 0, actual '$($mmRead.SystemResponsiveness)'" }
+    # SystemResponsiveness is deliberately NOT written here any more. It belongs to the
+    # mmcsSystemResponsiveness dropdown - see the "one value gets one home" note on that
+    # catalog entry. This step used to write 0 and then verify it, so a bulk network apply
+    # silently discarded whatever else the user had chosen in that dropdown, including
+    # "Windows default", and reported the discard as a pass. It reports the value now
+    # instead of claiming it. NetworkThrottlingIndex stays written here: the network
+    # throttle genuinely is a network setting, this routine reports the change, and this
+    # routine and the netThrottle toggle agree on what "on" means (0xFFFFFFFF).
+    $srNow = $mmRead.SystemResponsiveness
+    if ($null -eq $srNow) { $log += "[OK] SystemResponsiveness unset (Windows default) - owned by the System Responsiveness dropdown, left untouched." }
+    elseif ($srNow -eq 0) { $log += "[OK] SystemResponsiveness = 0 (Off, the gaming setting) - owned by the dropdown, left untouched." }
+    else { $log += "[OK] SystemResponsiveness = $srNow - owned by the System Responsiveness dropdown, left untouched." }
 
     # 6. Delivery Optimization P2P
     $doPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"
@@ -1917,12 +1926,20 @@ function Set-TweakState($id, $enabled, $value) {
         }
         "netThrottle" {
             $mmProfile = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
+            # This toggle owns NetworkThrottlingIndex and nothing else. It used to write
+            # SystemResponsiveness too, and that value has a different owner: the
+            # mmcsSystemResponsiveness dropdown. ON wrote 0, which the dropdown also
+            # recommends, so the two agreed by luck. OFF wrote 20, which was wrong three
+            # ways: Windows ships 10 on x64 so 20 is not a restore - it is a value the user
+            # never chose, and a worse one for gaming than doing nothing; 20 is not one of
+            # the dropdown's choices, so the dropdown was handed a state it could not
+            # represent; and toggling this off silently overwrote the setting the user is
+            # most likely to be relying on. Ownership is now enforced instead of agreed on
+            # by convention - see the "one value gets one home" note on that catalog entry.
             if ($on) {
                 Set-ItemProperty -Path $mmProfile -Name "NetworkThrottlingIndex" -Value -1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-                Set-ItemProperty -Path $mmProfile -Name "SystemResponsiveness" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
             } else {
                 Set-ItemProperty -Path $mmProfile -Name "NetworkThrottlingIndex" -Value 10 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-                Set-ItemProperty -Path $mmProfile -Name "SystemResponsiveness" -Value 20 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
             }
             return @{ success = $true; id = $id; enabled = $on }
         }
@@ -2242,6 +2259,14 @@ function Restore-Defaults {
     Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "MaxUserPort" -ErrorAction SilentlyContinue
     Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "TcpTimedWaitDelay" -ErrorAction SilentlyContinue
     $log += "[RESTORE] QoS limit and TCP port policy reset."
+
+    # The MM profile holds two values and they have different owners. SystemResponsiveness
+    # is restored through the dropdown branch below (it deletes the value), but
+    # NetworkThrottlingIndex is written by the netThrottle toggle and nothing restored it,
+    # so "restore Windows defaults" used to leave network throttling disabled forever with
+    # no way back except that toggle. 10 is the documented Windows default.
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -Value 10 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+    $log += "[RESTORE] Network throttling index back to the Windows default (10)."
 
     # Dropdowns cannot be reset through the boolean path - they hold a value, not an
     # on/off - so they are restored to the Windows default here instead: delete the
