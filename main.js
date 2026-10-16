@@ -418,12 +418,20 @@ app.whenReady().then(() => {
     createMainWindow();
 
     startBackend(sendProgress, () => {
+        // Guard: user may have closed the app while the backend was still starting.
+        // mainWindow is set to null in its 'closed' handler, so any access here
+        // would throw "Cannot read properties of null (reading 'loadFile')" and
+        // the Electron uncaught-exception dialog would pop up once per poll tick
+        // (up to 30 times). Bail out cleanly instead.
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+
         sendProgress(88, 'Loading interface…');
-        mainWindow.loadFile(path.join(PUBLIC_DIR, 'index.html'));
+        try { mainWindow.loadFile(path.join(PUBLIC_DIR, 'index.html')); } catch (_) { return; }
 
         let shown = false;
         const showMain = () => {
             if (shown) return;
+            if (!mainWindow || mainWindow.isDestroyed()) return;
             shown = true;
             sendProgress(100, 'Ready.');
             setTimeout(() => {
@@ -453,7 +461,7 @@ app.whenReady().then(() => {
             }, 350);
         };
 
-        mainWindow.once('ready-to-show', showMain);
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.once('ready-to-show', showMain);
         // Failsafe: never trap the user on the splash
         setTimeout(showMain, 9000);
     });
