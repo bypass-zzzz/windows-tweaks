@@ -2463,7 +2463,8 @@ function Get-BloatTasks {
     $taskDefs = @(
         @{ Path = "\Microsoft\Windows\Customer Experience Improvement Program\"; Name = "Consolidator"; Display = "CEIP Data Consolidator"; Impact = "High" },
         @{ Path = "\Microsoft\Windows\Customer Experience Improvement Program\"; Name = "UsbCeip"; Display = "USB Telemetry Collector"; Impact = "Medium" },
-        @{ Path = "\Microsoft\Windows\Application Experience\"; Name = "Microsoft Compatibility Appraiser"; Display = "Compatibility Telemetry"; Impact = "High" },
+        @{ Path = "\Microsoft\Windows\Application Experience\"; Name = "Microsoft Compatibility Appraiser"; Display = "Compatibility Telemetry (legacy)"; Impact = "High" },
+        @{ Path = "\Microsoft\Windows\Application Experience\"; Name = "Microsoft Compatibility Appraiser Exp"; Display = "Compatibility Telemetry"; Impact = "High" },
         @{ Path = "\Microsoft\Windows\Application Experience\"; Name = "StartupAppTask"; Display = "Startup App Telemetry"; Impact = "Medium" },
         @{ Path = "\Microsoft\Windows\DiskDiagnostic\"; Name = "Microsoft-Windows-DiskDiagnosticDataCollector"; Display = "Disk Diagnostic Collector"; Impact = "Low" },
         @{ Path = "\Microsoft\Windows\Maps\"; Name = "MapsUpdateTask"; Display = "Maps Auto-Updater"; Impact = "Low" },
