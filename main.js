@@ -16,6 +16,10 @@ let psServer = null;
 let apiToken = '';
 let stdoutCarry = '';
 let backendReady = false;
+// True once the splash has dissolved and the real UI has been shown. The main
+// window is created hidden at startup, so the second-instance handler must not
+// raise it before this flips (see the second-instance handler).
+let uiRevealed = false;
 const PORT = 48921;
 const FALLBACK_PORT = 48922;
 // Whichever port the backend actually bound. server.ps1 retries on
@@ -69,16 +73,33 @@ function relaunchAsAdmin() {
     const cmd = args
         ? `Start-Process -FilePath "${exe}" -ArgumentList '${args}' -Verb RunAs`
         : `Start-Process -FilePath "${exe}" -Verb RunAs`;
-    // Release the single-instance lock before spawning the elevated process,
-    // otherwise Process 2 (admin) can't acquire the lock and immediately quits.
-    app.releaseSingleInstanceLock();
+
+    // This process must hold the single-instance lock until the elevated copy
+    // is on its way: release it before spawning and a burst of launches could
+    // each win the freshly freed lock and spawn a UAC prompt of their own.
+    // Start-Process only returns once UAC was answered (or throws if it was
+    // denied), so the launcher's exit is the signal to let go and quit.
+    let handedOff = false;
+    const release = () => {
+        if (handedOff) return;
+        handedOff = true;
+        try { app.releaseSingleInstanceLock(); } catch (_) {}
+        app.quit();
+    };
+
     try {
-        // Use async spawn so Process 1 can exit immediately after handing off.
-        spawn('powershell.exe',
+        const child = spawn('powershell.exe',
             ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd],
-            { windowsHide: true, stdio: 'ignore', detached: true }
-        ).unref();
-    } catch (_) {}
+            { windowsHide: true, stdio: 'ignore' }
+        );
+        child.on('exit', release);
+        child.on('error', release);
+        // Never wedge on an ignored UAC prompt: give up waiting after 60s.
+        const cap = setTimeout(release, 60000);
+        if (cap.unref) cap.unref();
+    } catch (_) {
+        release();
+    }
 }
 
 // ─── Instant Splash (shows immediately, no waiting) ───
@@ -458,19 +479,28 @@ if (!gotLock) {
     app.quit();
 } else {
     app.on('second-instance', () => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
+        // Spam-clicking the launcher during startup lands here while the main
+        // window exists but has not loaded yet. Raising it that early would
+        // flash an empty black window next to the splash, so until the UI is
+        // actually revealed this only nudges the splash.
+        if (uiRevealed && mainWindow && !mainWindow.isDestroyed()) {
             if (mainWindow.isMinimized()) mainWindow.restore();
             mainWindow.show();
             mainWindow.focus();
+            console.log('[App] second instance blocked — focused the running window');
         } else if (splashWindow && !splashWindow.isDestroyed()) {
             splashWindow.focus();
+            console.log('[App] second instance blocked — still starting, focused the splash');
+        } else {
+            console.log('[App] second instance blocked — nothing shown yet');
         }
     });
 
 app.whenReady().then(() => {
     if (!isAdminSync()) {
-        relaunchAsAdmin(); // UAC prompt — elevated copy takes over
-        app.quit();
+        // UAC prompt — the elevated copy takes over. This process stays alive
+        // (holding the lock) until relaunchAsAdmin has handed off.
+        relaunchAsAdmin();
         return;
     }
 
@@ -504,7 +534,10 @@ app.whenReady().then(() => {
                 // that never runs splashDissolve cannot trap the user here.
                 const finish = () => {
                     try { if (splashWindow && !splashWindow.isDestroyed()) splashWindow.close(); } catch (_) {}
-                    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        uiRevealed = true;
+                        mainWindow.show();
+                    }
                     initAutoUpdate();
                 };
                 let dissolved = false;
