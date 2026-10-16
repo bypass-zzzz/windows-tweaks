@@ -422,26 +422,49 @@ async function fetchSystemStatus() {
         const data = await res.json();
         hideBootOverlay();
 
-        // Hardware Specs Header
+        // Hardware Specs Header. A failed query renders "Unavailable" instead of leaving
+        // "Detecting..." up forever as though it were still working, and the GPU refresh
+        // rate is omitted when WMI does not report one - this used to print the
+        // placeholder "60Hz" for every GPU without a rate (iGPU, virtual adapter).
         if (data.cpu) document.getElementById("specCpu").textContent = data.cpu;
+        else document.getElementById("specCpu").textContent = "Unavailable";
         if (data.gpus && data.gpus.length > 0) {
-            document.getElementById("specGpu").textContent = `${data.gpus[0].Name} (${data.gpus[0].RefreshRate || '60Hz'})`;
+            const gpu = data.gpus[0];
+            document.getElementById("specGpu").textContent = gpu.RefreshRate ? `${gpu.Name} (${gpu.RefreshRate})` : gpu.Name;
+        } else {
+            document.getElementById("specGpu").textContent = "Unavailable";
         }
         if (data.os) document.getElementById("specOs").textContent = data.os;
+        else document.getElementById("specOs").textContent = "Unavailable";
 
-        // Metric Tiles
-        document.getElementById("valCpu").textContent = data.cpuLoad !== undefined ? data.cpuLoad : "4";
-        document.getElementById("barCpu").style.width = `${Math.min(100, Math.max(5, data.cpuLoad || 4))}%`;
+        // Metric Tiles. null now means "the machine did not answer" and renders as a dash.
+        // Three falsy-zero bugs lived in this block: `data.cpuLoad || 4` turned a genuine
+        // 0% reading into 4% (and Math.max(5, ...) then drew it as a 5% bar, so an idle
+        // CPU never showed as idle), `data.ram.speed || 6000` did the same to the memory
+        // clock, and `if (data.processCount)` silently skipped a count of zero.
+        const numOrNull = (v) => (typeof v === "number" && isFinite(v) ? v : null);
+
+        const cpuLoad = numOrNull(data.cpuLoad);
+        document.getElementById("valCpu").textContent = cpuLoad === null ? "\u2014" : cpuLoad;
+        document.getElementById("barCpu").style.width = cpuLoad === null ? "0%" : `${Math.min(100, Math.max(0, cpuLoad))}%`;
 
         if (data.ram) {
-            document.getElementById("valRam").textContent = data.ram.used;
-            document.getElementById("valRamTotal").textContent = `/ ${data.ram.total} GB`;
-            document.getElementById("barRam").style.width = `${data.ram.percent}%`;
-            document.getElementById("valRamSpeed").textContent = `${data.ram.speed || 6000} MT/s (${data.ram.sticks} Sticks)`;
+            const ram = data.ram;
+            const ramUsed = numOrNull(ram.used);
+            const ramTotal = numOrNull(ram.total);
+            const ramPercent = numOrNull(ram.percent);
+            const ramSpeed = numOrNull(ram.speed);
+            const ramSticks = numOrNull(ram.sticks);
+            document.getElementById("valRam").textContent = ramUsed === null ? "\u2014" : ramUsed;
+            document.getElementById("valRamTotal").textContent = ramTotal === null ? "/ \u2014 GB" : `/ ${ramTotal} GB`;
+            document.getElementById("barRam").style.width = ramPercent === null ? "0%" : `${Math.min(100, Math.max(0, ramPercent))}%`;
+            document.getElementById("valRamSpeed").textContent =
+                (ramSpeed === null ? "\u2014 MT/s" : `${ramSpeed} MT/s`) + (ramSticks ? ` (${ramSticks} Sticks)` : "");
         }
 
-        if (data.processCount) {
-            document.getElementById("valProcesses").textContent = data.processCount;
+        const procCount = numOrNull(data.processCount);
+        if (procCount !== null) {
+            document.getElementById("valProcesses").textContent = procCount;
         }
 
         // Quick Audit Checklist + live switch state (skip re-render if unchanged)
@@ -454,6 +477,44 @@ async function fetchSystemStatus() {
             }
             syncSwitches();
             updateBadge("badgeHagsOverall", data.tweaks.hags, "HAGS Active", "HAGS Off");
+
+            // The next four were static text in index.html that no code ever touched, so
+            // the dashboard asserted "All Threads Uncapped", "Kernel In RAM", "Invariant
+            // TSC" and "Debloated" no matter what the machine was actually set to.
+            updateBadge("badgeKernelRam", data.tweaks.kernelRamLock, "Kernel In RAM", "Kernel Paged");
+            updateBadge("badgeTimer", data.tweaks.platformTick, "Invariant TSC", "Default Timer");
+            const cpuFreqEl = document.getElementById("valCpuFreq");
+            if (cpuFreqEl) {
+                cpuFreqEl.textContent = data.tweaks.cpuBoost === true
+                    ? "All Threads Uncapped"
+                    : (data.tweaks.cpuBoost === false ? "Windows-Managed Boost" : "\u2014");
+            }
+
+            // Debloat state: computed by the backend from the services the app's own
+            // debloat action writes to, so it describes the machine, not the intent.
+            const telemetryEl = document.getElementById("lblTelemetry");
+            if (telemetryEl) {
+                telemetryEl.textContent = data.tweaks.telemetryDisabled === true
+                    ? "Telemetry Disabled"
+                    : (data.tweaks.telemetryDisabled === false
+                        ? `Telemetry Active (${data.tweaks.telemetryRemaining} on)`
+                        : "Telemetry \u2014");
+            }
+            const debloatEl = document.getElementById("badgeDebloated");
+            if (debloatEl) {
+                const rem = data.tweaks.debloatRemaining;
+                const total = data.tweaks.debloatTotal;
+                if (data.tweaks.debloated === true) {
+                    debloatEl.className = "badge badge-active";
+                    debloatEl.textContent = "Debloated";
+                } else if (typeof rem === "number" && typeof total === "number") {
+                    debloatEl.className = "badge badge-neutral";
+                    debloatEl.textContent = `Debloated ${total - rem}/${total}`;
+                } else {
+                    debloatEl.className = "badge badge-neutral";
+                    debloatEl.textContent = "\u2014";
+                }
+            }
             const nvRow = document.getElementById("tweakRowNvidia");
             if (nvRow) nvRow.style.display = data.tweaks.nvidiaAvailable ? "" : "none";
         }
@@ -1015,15 +1076,23 @@ async function fetchNetworkStatus() {
         const data = await res.json();
 
         if (data.interfaceDescription) {
-            document.getElementById("specNic").textContent = `${data.interfaceDescription} (${data.linkSpeed || '2.5 Gbps'})`;
+            // The link speed is omitted when unknown. It used to be filled in with the
+            // placeholder "2.5 Gbps" for every adapter that did not report one.
+            document.getElementById("specNic").textContent = data.linkSpeed
+                ? `${data.interfaceDescription} (${data.linkSpeed})`
+                : data.interfaceDescription;
+        } else {
+            document.getElementById("specNic").textContent = "Unavailable";
         }
 
-        if (data.mtu) {
+        {
             // The slider and its label were removed from index.html when MTU was
             // fixed at 1500. Writing to them threw on null and killed the rest of
             // this update. applyMtu() refreshes the same badge directly.
+            // An unreadable MTU shows a dash rather than leaving the last value up
+            // looking current.
             const mtuBadge = document.getElementById("currentMtuDisplay");
-            if (mtuBadge) mtuBadge.textContent = data.mtu;
+            if (mtuBadge) mtuBadge.textContent = data.mtu ? String(data.mtu) : "\u2014";
         }
         // Update TCP switches from live state
         if (data.tcpSettings) {
@@ -1042,6 +1111,13 @@ function updateBadge(id, isActive, activeText = "Active", inactiveText = "Disabl
     if (!el) return;
     if (el.matches && el.matches('input[type="checkbox"]')) {
         el.checked = !!isActive;
+        return;
+    }
+    // null means the state could not be read. Rendering the inactive text for it would be
+    // a claim about the machine, so it renders a neutral dash instead.
+    if (isActive === null || isActive === undefined) {
+        el.className = "badge badge-neutral";
+        el.textContent = "\u2014";
         return;
     }
     if (isActive) {

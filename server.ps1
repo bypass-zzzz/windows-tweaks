@@ -364,14 +364,21 @@ function Get-StaticHw {
     $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue
     $os  = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
 
-    $cpuLabel = "AMD Ryzen 5 7600X 6-Core Processor"
+    # No fabricated fallbacks. These two used to be the literal dev-machine strings
+    # ("AMD Ryzen 5 7600X 6-Core Processor", "Microsoft Windows 11 Pro"), so on any
+    # other machine a failed WMI query displayed someone else's CPU and OS as if they
+    # were yours. Unknown is reported as unknown and the UI renders a dash.
+    $cpuLabel = $null
     if ($cpu -and $cpu.Name) { $cpuLabel = "$($cpu.Name) ($($cpu.NumberOfCores)C / $($cpu.NumberOfLogicalProcessors)T)" }
 
-    $osLabel = "Microsoft Windows 11 Pro"
+    $osLabel = $null
     if ($os -and $os.Caption) { $osLabel = "$($os.Caption) ($($os.Version) Build $($os.BuildNumber))" }
 
-    $script:StaticHw = @{ CpuLabel = $cpuLabel; OsLabel = $osLabel }
-    return $script:StaticHw
+    $hw = @{ CpuLabel = $cpuLabel; OsLabel = $osLabel }
+    # Only cache an answer that has something in it: caching a transient WMI failure
+    # for the life of the process would pin "unknown" on a machine that can answer.
+    if ($cpuLabel -or $osLabel) { $script:StaticHw = $hw }
+    return $hw
 }
 
 # -----------------------------------------------------------------------------
@@ -443,17 +450,28 @@ function Get-SystemAudit {
     $ram = Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue
 
     $totalRamBytes = ($ram | Measure-Object -Property Capacity -Sum).Sum
-    $totalRamGB = if ($totalRamBytes) { [Math]::Round($totalRamBytes / 1GB, 1) } else { 32 }
+    # Every fallback in this block used to be an invented measurement - 32 GB total,
+    # 20 GB free, 8.0 GB used, 6000 MT/s - and on a machine where the query fails those
+    # numbers were displayed as though they had been read. That is worse than showing
+    # nothing: the entire value of this app is that the numbers are real. Unknown is
+    # $null now, and the UI renders it as a dash.
+    $totalRamGB = if ($totalRamBytes -and $totalRamBytes -gt 0) { [Math]::Round($totalRamBytes / 1GB, 1) } else { $null }
     $ramSample = Get-RamSample
     $freeRamGB = if ($ramSample) { $ramSample.FreeGB } else {
         $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
-        if ($os.FreePhysicalMemory) { [Math]::Round($os.FreePhysicalMemory / 1MB, 1) } else { 20 }
+        if ($os -and $os.FreePhysicalMemory) { [Math]::Round($os.FreePhysicalMemory / 1MB, 1) } else { $null }
     }
-    $usedRamGB = [Math]::Round($totalRamGB - $freeRamGB, 1)
-    if ($usedRamGB -lt 0) { $usedRamGB = 8.0 }
-    $ramPercent = [Math]::Round(($usedRamGB / $totalRamGB) * 100, 1)
+    # used and percent are derived, so they are unknown whenever either input is.
+    # Clamping free > total (rounding only) to 0 is honest; inventing 8.0 was not.
+    $usedRamGB = $null
+    $ramPercent = $null
+    if ($null -ne $totalRamGB -and $null -ne $freeRamGB) {
+        $usedRamGB = [Math]::Round($totalRamGB - $freeRamGB, 1)
+        if ($usedRamGB -lt 0) { $usedRamGB = 0.0 }
+        if ($totalRamGB -gt 0) { $ramPercent = [Math]::Round(($usedRamGB / $totalRamGB) * 100, 1) }
+    }
     $ramSpeed = ($ram | Select-Object -First 1).Speed
-    if (-not $ramSpeed) { $ramSpeed = 6000 }
+    if ($null -eq $ramSpeed -or $ramSpeed -le 0) { $ramSpeed = $null }
 
     $gpuList = @()
     foreach ($g in $gpus) {
@@ -462,7 +480,11 @@ function Get-SystemAudit {
                 Name = $g.Name
                 DriverVersion = $g.DriverVersion
                 Resolution = "$($g.CurrentHorizontalResolution)x$($g.CurrentVerticalResolution)"
-                RefreshRate = if ($g.CurrentRefreshRate) { "$($g.CurrentRefreshRate) Hz" } else { "170 Hz" }
+                # WMI returns null for a GPU that is not driving the display (an iGPU, a
+                # virtual adapter, a headless card), and this answered "170 Hz" - the dev
+                # machine's monitor - for all of them. The tile now simply has no refresh
+                # rate to show, which is the truth.
+                RefreshRate = if ($g.CurrentRefreshRate -and $g.CurrentRefreshRate -gt 0) { "$($g.CurrentRefreshRate) Hz" } else { $null }
             }
         }
     }
@@ -521,7 +543,7 @@ function Get-SystemAudit {
         $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue
         $cpuLoadVal = ($cpu | Measure-Object -Property LoadPercentage -Average -ErrorAction SilentlyContinue).Average
     }
-    if ($null -eq $cpuLoadVal) { $cpuLoadVal = 6 }
+    # No fabricated default: an unreadable CPU load is reported as unknown, not as 6%.
 
     # --- Extended gaming/OS audit (all reversible, all exposed as toggles) ---
     $gameBarProps = Get-ItemProperty "HKCU:\SOFTWARE\Microsoft\GameBar" -ErrorAction SilentlyContinue
@@ -545,11 +567,14 @@ function Get-SystemAudit {
     # could never show ON even when compression really was off. The Set-TweakState
     # branch for this same id read the correct property, so the file disagreed with
     # itself: the write verified correctly while the switch display never did.
-    $isMemDecompressed = ($null -ne $mmAgent -and $mmAgent.MemoryCompression -eq $false)
+    # Same reasoning as cpuBoost: an unreadable MMAgent is unknown, not "compression on".
+    $isMemDecompressed = if ($null -ne $mmAgent) { ($mmAgent.MemoryCompression -eq $false) } else { $null }
 
     $cpuMinAc = Get-PowerAcValue "SUB_PROCESSOR" "PROCTHROTTLEMIN"
     $cpuMaxAc = Get-PowerAcValue "SUB_PROCESSOR" "PROCTHROTTLEMAX"
-    $isCpuBoost = ($cpuMinAc -eq 100 -and $cpuMaxAc -eq 100)
+    # powercfg can fail to answer, and "no answer" is not the same claim as "boost is
+    # capped for background work" - that distinction is why this can now be $null.
+    $isCpuBoost = if ($null -ne $cpuMinAc -and $null -ne $cpuMaxAc) { ($cpuMinAc -eq 100 -and $cpuMaxAc -eq 100) } else { $null }
 
     $gpuNames = @($gpus | ForEach-Object { $_.Name })
     $hasNvidia = [bool]($gpuNames -match "NVIDIA")
@@ -559,15 +584,37 @@ function Get-SystemAudit {
     # --- Custom (non-registry) audits ---
     $isHiberOff = -not (Test-Path "$env:SystemDrive\hiberfil.sys")
 
-    $nbtOpts = (Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" -ErrorAction SilentlyContinue | Select-Object -First 1).TcpipNetbiosOptions
+    # NetBIOS is a per-adapter setting, so it has to be read off the adapter this audit is
+    # describing. This took the first IP-enabled adapter WMI happened to list, which on a
+    # machine with a VPN or a second NIC is often a different one - so the switch showed
+    # that other adapter's NetBIOS state and the write then changed that other adapter.
+    $primaryNic = Get-PrimaryAdapter
+    $nbtOpts = $null
+    if ($primaryNic) {
+        $nbtOpts = (Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex=$($primaryNic.InterfaceIndex)" -ErrorAction SilentlyContinue).TcpipNetbiosOptions
+    }
     $isNbtOff = ($nbtOpts -eq 2)
 
+    # A failed netsh produces no output at all, and a regex that finds no match in an
+    # empty string is not evidence that the tunnel is enabled - so empty output is $null
+    # (rendered as a dash) rather than a confident "not disabled".
     $teredoOut = ((& netsh.exe interface teredo show state 2>$null) | Out-String)
-    $isTeredoOff = ($teredoOut -match '(State|Type)\s*:\s*disabled')
+    $isTeredoOff = if ($teredoOut.Trim().Length -gt 0) { [bool]($teredoOut -match '(State|Type)\s*:\s*disabled') } else { $null }
     $isatapOut = ((& netsh.exe interface isatap show state 2>$null) | Out-String)
-    $isIsatapOff = ($isatapOut -match '(State|Type)\s*:\s*disabled')
+    $isIsatapOff = if ($isatapOut.Trim().Length -gt 0) { [bool]($isatapOut -match '(State|Type)\s*:\s*disabled') } else { $null }
     $sitoOut = ((& netsh.exe interface 6to4 show state 2>$null) | Out-String)
-    $is6to4Off = ($sitoOut -match '(State|Type)\s*:\s*disabled')
+    $is6to4Off = if ($sitoOut.Trim().Length -gt 0) { [bool]($sitoOut -match '(State|Type)\s*:\s*disabled') } else { $null }
+
+    # "Telemetry Disabled" and "Debloated" are claims about this machine, so they are read
+    # from the services rather than remembered, and from the same curated list the debloat
+    # action writes to - so the badge and the Services tab can never disagree about what
+    # "debloated" means. Zero services found is "the query failed", not "everything is
+    # disabled": that is $null and renders as a dash.
+    $bloatNames = @($script:BloatTargets | ForEach-Object { $_.Name })
+    $bloatLive = @(Get-Service -Name $bloatNames -ErrorAction SilentlyContinue)
+    $bloatKnown = ($bloatLive.Count -gt 0)
+    $bloatOn = @($bloatLive | Where-Object { "$($_.StartType)" -ne "Disabled" })
+    $telemetryOn = @($bloatOn | Where-Object { (Get-ServiceGroupName $_.Name) -eq "telemetry" })
 
     $tweakBase = @{
         hags = $isHagsActive
@@ -592,6 +639,13 @@ function Get-SystemAudit {
         teredo = $isTeredoOff
         isatap = $isIsatapOff
         sixtofour = $is6to4Off
+        # Computed, not asserted (see the note above the bloat probe). These drive the
+        # dashboard's "Telemetry Disabled" line and "Debloated" badge.
+        debloated = $(if ($bloatKnown) { $bloatOn.Count -eq 0 } else { $null })
+        debloatRemaining = $(if ($bloatKnown) { $bloatOn.Count } else { $null })
+        debloatTotal = $bloatNames.Count
+        telemetryDisabled = $(if ($bloatKnown) { $telemetryOn.Count -eq 0 } else { $null })
+        telemetryRemaining = $(if ($bloatKnown) { $telemetryOn.Count } else { $null })
     }
     foreach ($def in $script:RegTweaks) {
         $tweakBase[$def.id] = Get-RegTweakState $def
@@ -600,17 +654,17 @@ function Get-SystemAudit {
     return @{
         os = $hw.OsLabel
         cpu = $hw.CpuLabel
-        cpuLoad = [Math]::Round($cpuLoadVal, 0)
+        cpuLoad = if ($null -ne $cpuLoadVal) { [Math]::Round($cpuLoadVal, 0) } else { $null }
         ram = @{
             total = $totalRamGB
             used = $usedRamGB
             free = $freeRamGB
             percent = $ramPercent
             speed = $ramSpeed
-            sticks = if ($ram.Count) { $ram.Count } else { 2 }
+            sticks = if ($ram.Count) { $ram.Count } else { $null }
         }
         gpus = $gpuList
-        powerPlan = if ($activePlan) { $activePlan } else { "Ultimate Performance" }
+        powerPlan = if ($activePlan) { $activePlan } else { $null }
         processCount = $procCount
         isAdmin = $script:IsAdmin
         # Machine-readable proof that the safety net is engaged, so a harness or an
@@ -620,21 +674,28 @@ function Get-SystemAudit {
     }
 }
 
+# The one adapter this app means when it says "your network". Shared deliberately: on a
+# machine with a VPN, a virtual switch or a Wi-Fi adapter, "the first adapter Get-NetAdapter
+# returns" is not the same NIC as "the first IP-enabled adapter WMI returns", and the
+# NetBIOS probe and the NetBIOS write each used a different one of those two rules.
+function Get-PrimaryAdapter {
+    $a = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" -and $_.Virtual -ne $true } | Select-Object -First 1
+    if (-not $a) { $a = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" } | Select-Object -First 1 }
+    if (-not $a) { $a = Get-NetAdapter -ErrorAction SilentlyContinue | Select-Object -First 1 }
+    return $a
+}
+
 function Get-NetworkAudit {
-    $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" -and $_.Virtual -ne $true } | Select-Object -First 1
-    if (-not $adapter) {
-        $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" } | Select-Object -First 1
-    }
-    if (-not $adapter) {
-        $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Select-Object -First 1
-    }
+    $adapter = Get-PrimaryAdapter
 
     $ipConfig = Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
     $dnsServers = (Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
 
     # MTU
     $sub = Get-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
-    $currentMtu = if ($sub.NlMtu) { $sub.NlMtu } else { 1280 }
+    # Was 1280 - which this app's own UI copy calls backwards, being the IPv6 minimum
+    # rather than an optimisation. Reporting no MTU beats reporting a wrong one.
+    $currentMtu = if ($sub -and $sub.NlMtu) { $sub.NlMtu } else { $null }
 
     # Registry TCP NoDelay / Delayed ACK
     $adapterGuid = $adapter.InterfaceGuid
@@ -658,14 +719,18 @@ function Get-NetworkAudit {
     $qosVal = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Psched" -Name "NonBestEffortLimit" -ErrorAction SilentlyContinue).NonBestEffortLimit
     $maxPorts = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "MaxUserPort" -ErrorAction SilentlyContinue).MaxUserPort
 
+    # Unknown is reported as unknown. Each of these used to carry a plausible hardcoded
+    # fallback - this machine's literal NIC description, "2.5 Gbps", the address
+    # 192.168.1.100, and the DNS pair 1.0.0.1/1.1.1.1 - so a failed query did not read as
+    # "unavailable", it read as a measurement of the user's own machine.
     return @{
-        name = if ($adapter.Name) { $adapter.Name } else { "Ethernet" }
-        interfaceDescription = if ($adapter.InterfaceDescription) { $adapter.InterfaceDescription } else { "Realtek Gaming 2.5GbE Family Controller" }
-        linkSpeed = if ($adapter.LinkSpeed) { $adapter.LinkSpeed } else { "2.5 Gbps" }
-        macAddress = $adapter.MacAddress
-        ipAddress = if ($ipConfig.IPAddress) { $ipConfig.IPAddress } else { "192.168.1.100" }
+        name = if ($adapter -and $adapter.Name) { $adapter.Name } else { $null }
+        interfaceDescription = if ($adapter -and $adapter.InterfaceDescription) { $adapter.InterfaceDescription } else { $null }
+        linkSpeed = if ($adapter -and $adapter.LinkSpeed) { $adapter.LinkSpeed } else { $null }
+        macAddress = if ($adapter) { $adapter.MacAddress } else { $null }
+        ipAddress = if ($ipConfig -and $ipConfig.IPAddress) { $ipConfig.IPAddress } else { $null }
         mtu = $currentMtu
-        dnsServers = if ($dnsServers) { $dnsServers } else { @("1.0.0.1", "1.1.1.1") }
+        dnsServers = if ($dnsServers) { $dnsServers } else { $null }
         tcpSettings = @{
             tcpNoDelay = ($tcpNoDelay -eq 1)
             tcpAckFrequency = ($ackFreq -eq 1)
@@ -923,27 +988,31 @@ function Run-MtuTest {
     }
 }
 
-function Get-BloatServices {
-    $targetServices = @(
-        @{ Name = "DiagTrack"; Display = "Connected User Experiences and Telemetry"; Safe = $true; Impact = "High" },
-        @{ Name = "WerSvc"; Display = "Windows Error Reporting Service"; Safe = $true; Impact = "Medium" },
-    
-        @{ Name = "lfsvc"; Display = "Geolocation Service"; Safe = $true; Impact = "Low" },
-        @{ Name = "TrkWks"; Display = "Distributed Link Tracking Client"; Safe = $true; Impact = "Low" },
-        @{ Name = "RemoteRegistry"; Display = "Remote Registry Access"; Safe = $true; Impact = "Medium" },
-        @{ Name = "wisvc"; Display = "Windows Insider Telemetry Service"; Safe = $true; Impact = "Low" },
-        @{ Name = "MapsBroker"; Display = "Downloaded Maps Background Manager"; Safe = $true; Impact = "Low" },
-        @{ Name = "WSearch"; Display = "Windows Search Indexer"; Safe = $true; Impact = "Medium" },
-        @{ Name = "XblGameSave"; Display = "Xbox Live Game Save"; Safe = $true; Impact = "Low" },
-        @{ Name = "XboxGipSvc"; Display = "Xbox Accessory Management Service"; Safe = $true; Impact = "Low" },
-        @{ Name = "XboxNetApiSvc"; Display = "Xbox Live Networking Service"; Safe = $true; Impact = "Low" },
-        @{ Name = "Spooler"; Display = "Print Spooler (only if you print)"; Safe = $true; Impact = "Low" },
-        @{ Name = "CDPSvc"; Display = "Connected Devices Platform Service"; Safe = $true; Impact = "Low" },
-        @{ Name = "dmwappushservice"; Display = "Device Management Push Telemetry"; Safe = $true; Impact = "Medium" },
-        @{ Name = "PcaSvc"; Display = "Program Compatibility Assistant"; Safe = $true; Impact = "Low" }
-    )
+# The curated set of services this app is willing to disable. It lives at module scope
+# because three places now need it: the Services tab, and the two dashboard badges that
+# report whether the app's own debloat action has actually been applied ("Telemetry
+# Disabled", "Debloated"). Those two badges used to be static markup text, so they
+# asserted a state the machine might not be in - on the author's machine the badge read
+# "Debloated" while WSearch was still running.
+$script:BloatTargets = @(
+    @{ Name = "DiagTrack"; Display = "Connected User Experiences and Telemetry"; Safe = $true; Impact = "High" },
+    @{ Name = "WerSvc"; Display = "Windows Error Reporting Service"; Safe = $true; Impact = "Medium" },
+    @{ Name = "lfsvc"; Display = "Geolocation Service"; Safe = $true; Impact = "Low" },
+    @{ Name = "TrkWks"; Display = "Distributed Link Tracking Client"; Safe = $true; Impact = "Low" },
+    @{ Name = "RemoteRegistry"; Display = "Remote Registry Access"; Safe = $true; Impact = "Medium" },
+    @{ Name = "wisvc"; Display = "Windows Insider Telemetry Service"; Safe = $true; Impact = "Low" },
+    @{ Name = "MapsBroker"; Display = "Downloaded Maps Background Manager"; Safe = $true; Impact = "Low" },
+    @{ Name = "WSearch"; Display = "Windows Search Indexer"; Safe = $true; Impact = "Medium" },
+    @{ Name = "XblGameSave"; Display = "Xbox Live Game Save"; Safe = $true; Impact = "Low" },
+    @{ Name = "XboxGipSvc"; Display = "Xbox Accessory Management Service"; Safe = $true; Impact = "Low" },
+    @{ Name = "XboxNetApiSvc"; Display = "Xbox Live Networking Service"; Safe = $true; Impact = "Low" },
+    @{ Name = "Spooler"; Display = "Print Spooler (only if you print)"; Safe = $true; Impact = "Low" },
+    @{ Name = "CDPSvc"; Display = "Connected Devices Platform Service"; Safe = $true; Impact = "Low" },
+    @{ Name = "dmwappushservice"; Display = "Device Management Push Telemetry"; Safe = $true; Impact = "Medium" },
+    @{ Name = "PcaSvc"; Display = "Program Compatibility Assistant"; Safe = $true; Impact = "Low" }
+)
 
-    # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # SERVICE GROUPS
 #
 # Services are grouped from "obvious background consumer junk" through to the
@@ -1043,6 +1112,9 @@ function Get-ServiceDescription($svc, $curated) {
     if ([string]::IsNullOrWhiteSpace($display)) { $display = $svc.Name }
     return "No description published by Windows for this service. It is part of '$display'. Start type and live status shown here are read from the Service Control Manager."
 }
+
+function Get-BloatServices {
+    $targetServices = $script:BloatTargets
 
 # Return EVERY service on the machine, not just the curated telemetry set, so
     # the Services tab is an honest view of what is installed and running. Only
@@ -2209,17 +2281,23 @@ function Set-ServiceState($name, $optimize) {
 
 function Restore-Defaults {
     $log = @()
-    $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" -and $_.Virtual -ne $true } | Select-Object -First 1
-    if (-not $adapter) { $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Select-Object -First 1 }
-    $adapterName = if ($adapter) { $adapter.Name } else { "Ethernet" }
+    $adapter = Get-PrimaryAdapter
+    $adapterName = if ($adapter) { $adapter.Name } else { $null }
 
-    & netsh.exe interface ipv4 set subinterface $adapterName mtu=1500 store=persistent 2>$null | Out-Null
-    & netsh.exe interface ipv6 set subinterface $adapterName mtu=1500 store=persistent 2>$null | Out-Null
-    $log += "[RESTORE] MTU restored to 1500 default."
+    if ($adapterName) {
+        & netsh.exe interface ipv4 set subinterface $adapterName mtu=1500 store=persistent 2>$null | Out-Null
+        & netsh.exe interface ipv6 set subinterface $adapterName mtu=1500 store=persistent 2>$null | Out-Null
+        $log += "[RESTORE] MTU restored to 1500 default."
 
-    Set-DnsClientServerAddress -InterfaceAlias $adapterName -ResetServerAddresses -ErrorAction SilentlyContinue
-    Clear-DnsClientCache -ErrorAction SilentlyContinue | Out-Null
-    $log += "[RESTORE] DNS restored to Automatic (DHCP)."
+        Set-DnsClientServerAddress -InterfaceAlias $adapterName -ResetServerAddresses -ErrorAction SilentlyContinue
+        Clear-DnsClientCache -ErrorAction SilentlyContinue | Out-Null
+        $log += "[RESTORE] DNS restored to Automatic (DHCP)."
+    } else {
+        # Pointing netsh at an interface name we invented ("Ethernet") and then logging
+        # "[RESTORE] MTU restored" was two lies at once: nothing was restored, and the
+        # log claimed it was.
+        $log += "[SKIP] No network adapter found - MTU and DNS were left untouched."
+    }
 
     & netsh.exe int tcp reset 2>$null | Out-Null
     $log += "[RESTORE] Windows TCP stack reset to default."
