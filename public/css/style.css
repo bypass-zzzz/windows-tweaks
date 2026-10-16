@@ -268,6 +268,7 @@ body {
    ============================================================================== */
 .nav-bar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 6px;
     padding: 10px 28px;
@@ -319,6 +320,17 @@ body {
 .nav-tab.active svg {
     opacity: 1;
     color: #000;
+}
+
+/* Narrow windows: the app's minimum window width is 1100px, where the tab row
+   needs 1122px and the last tab would clip. Tighten spacing so all nine tabs
+   fit on one row. Below this, .nav-bar's flex-wrap keeps every tab reachable
+   by wrapping instead of hiding them behind a scrollbar. */
+@media (max-width: 1200px) {
+    .nav-bar {
+        padding: 10px 20px;
+        gap: 4px;
+    }
 }
 
 /* ==============================================================================
