@@ -58,10 +58,22 @@ function isAdminSync() {
 }
 
 function relaunchAsAdmin() {
-    const exe = process.execPath;
-    const cmd = app.isPackaged
-        ? `Start-Process -FilePath "${exe}" -Verb RunAs`
-        : `Start-Process -FilePath "${exe}" -ArgumentList '"${app.getAppPath()}"' -Verb RunAs`;
+    let exe = process.execPath;
+    let args = '';
+    if (app.isPackaged) {
+        args = '';
+    } else {
+        try {
+            exe = require('electron');
+            args = `"${app.getAppPath()}"`;
+        } catch (_) {
+            exe = process.execPath;
+            args = `"${app.getAppPath()}"`;
+        }
+    }
+    const cmd = args
+        ? `Start-Process -FilePath "${exe}" -ArgumentList '${args}' -Verb RunAs`
+        : `Start-Process -FilePath "${exe}" -Verb RunAs`;
     try {
         require('child_process').spawnSync(
             'powershell.exe',
