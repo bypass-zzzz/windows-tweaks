@@ -5,7 +5,10 @@
 
 param(
     [int]$Port = 48921,
-    [switch]$NoBrowser
+    [switch]$NoBrowser,
+    # Blocks every system mutation while still serving real read data.
+    # See the DRY-RUN SAFETY NET block below the param block.
+    [switch]$DryRun
 )
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -20,6 +23,236 @@ if (-not $script:IsAdmin) {
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $publicDir = Join-Path $scriptDir "public"
+
+# ==============================================================================
+# DRY-RUN SAFETY NET  (-DryRun)
+# ==============================================================================
+# This backend writes real registry keys, BCD entries, services, scheduled tasks
+# and adapter settings. Exercise it without touching the machine by starting it
+# with -DryRun: every mutation is blocked, while all reads still execute so the
+# UI and the harness see genuine system state.
+#
+# Two mechanisms are required, because the two halves of the surface behave
+# differently:
+#
+#   1. Cmdlets. $WhatIfPreference = $true disables every ShouldProcess cmdlet in
+#      one line - Set-ItemProperty (55 sites), New-Item (28), Remove-Item (18),
+#      Remove-ItemProperty (17), Set-Content, Set-Service, Set-NetAdapter,
+#      Invoke-CimMethod, ... Verified per-cmdlet on this build.
+#      EXCEPTION: some cmdlets declare no WhatIf parameter at all, so
+#      $WhatIfPreference silently does nothing for them. On this build that is
+#      Set/Disable/Enable-ScheduledTask and Enable/Disable-MMAgent. Those are
+#      shadowed explicitly at the bottom of this block. tools\test-dryrun-guard.ps1
+#      re-derives that list from this file and fails if a mutating cmdlet without
+#      WhatIf support is ever added without a matching shadow.
+#
+#   2. External tools. netsh (30 call sites), powercfg (37), bcdedit (12),
+#      sc.exe (5) and reg.exe (1) ignore $WhatIfPreference completely - they are
+#      separate processes and cannot know it was set. They are shadowed with
+#      PowerShell functions of the same name; because function lookup takes
+#      precedence over a native executable, this covers every existing call site
+#      without editing any of them. Both the bare and ".exe" spellings are
+#      shadowed, since server.ps1 uses each (e.g. `bcdedit /enum` and
+#      `& bcdedit.exe /set ...`).
+#
+# The external guard is DEFAULT-DENY, and that is not a style choice. Classifying
+# each call by looking for mutating verbs (set/add/delete/...) was tried first and
+# failed on real code in this very file: `bcdedit /deletevalue useplatformclock`
+# and `powercfg /hibernate off` contain none of those words and were waved through
+# as reads - a dry run that quietly rewrites the boot configuration. The rule is
+# therefore inverted: only known-safe read verbs are allowed through, everything
+# else is blocked. Blocking a read by mistake only makes a dry run less
+# informative; allowing a write by mistake corrupts the machine.
+#
+# If you add a call to an external tool that is not shadowed here, add it below.
+if ($DryRun) {
+    # ── Load the modules this script uses BEFORE the WhatIf switch is thrown ──
+    # Two separate reasons, both measured on this host:
+    #
+    #   * Correctness. Auto-loading a module imports its exports when one of its
+    #     commands is first used, and that import CLOBBERS a same-named function
+    #     already defined in the session - which silently un-does a shadow below.
+    #     That is a real hole, not a cosmetic one: define the shadow, then call
+    #     Get-MMAgent (a plain read, so it runs even in a dry run), and
+    #     `Get-Command Disable-MMAgent` flips from our function to the real module
+    #     function, after which the "guarded" call really does disable memory
+    #     compression. This script reads Get-MMAgent and Get-ScheduledTask during
+    #     normal operation, so that would happen on the first /api/status request.
+    #     Loading the modules here means no auto-load can fire later, so the
+    #     shadows win for the life of the process.
+    #
+    #   * Readability. The same auto-load also runs the module's own Set-Alias
+    #     calls, which are ShouldProcess - so once $WhatIfPreference is set they
+    #     become no-ops that print a line of
+    #         What if: Performing the operation "Set Alias" on target "Name: gcim"
+    #     to stdout for every alias in the module. CimCmdlets alone emits twelve of
+    #     them into the middle of startup output, burying the API token and the log
+    #     lines a human actually needs. (No CIM alias is used by this script, so
+    #     nothing breaks; it is purely about being able to read the output.)
+    Import-Module CimCmdlets, NetAdapter, NetTCPIP, DnsClient, MMAgent, ScheduledTasks -ErrorAction SilentlyContinue
+
+    $WhatIfPreference = $true
+
+    $script:DryRunLogPath = Join-Path $scriptDir 'dry-run-blocked.log'
+    $script:DryRunBlocked = New-Object System.Collections.Generic.List[string]
+
+    # The ONLY argument tokens allowed to reach the real executable. Anything not
+    # matched here is treated as a mutation and blocked.
+    $script:DryRunReadVerbs = @{
+        'netsh'    = @('show', 'dump', 'help', '/?')
+        'powercfg' = @('/query', '-query', '/list', '-list', '/getactivescheme', '-getactivescheme',
+                       '/getacvalueindex', '-getacvalueindex', '/getdcvalueindex', '-getdcvalueindex', '/q', '/?')
+        'bcdedit'  = @('/enum')
+        'sc'       = @('query', 'queryex', 'qc', 'qdescription', 'enumdepend', 'getdisplayname', 'getkeyname', '/?')
+        'reg'      = @('query', 'q')
+        'taskkill' = @()   # no read mode exists
+    }
+
+    # Belt and braces: if any token from this list is present, deny even when a
+    # read verb is present too (e.g. `netsh ... set X name="show"`).
+    $script:DryRunWriteVerbs = @(
+        'set', 'add', 'delete', 'deletevalue', 'create', 'remove', 'reset', 'import', 'export',
+        'config', 'start', 'stop', 'restart', 'disable', 'enable', 'install', 'uninstall',
+        'on', 'off', 'change', 'setactive', 'setacvalueindex', 'setdcvalueindex',
+        'restoredefaultschemes', 'hibernate', 'flush', 'release', 'renew', 'load', 'unload',
+        'copy', 'run', 'end', 'save', 'apply'
+    )
+
+    function Test-WTDryRunAllowed {
+        param([string]$Tool, [string[]]$Arguments)
+
+        $readVerbs = $script:DryRunReadVerbs[$Tool]
+        if (-not $readVerbs -or $readVerbs.Count -eq 0) { return $false }
+
+        $tokens = @()
+        foreach ($a in $Arguments) {
+            if ($null -eq $a) { continue }
+            $t = ([string]$a).Trim().ToLowerInvariant()
+            if ($t) { $tokens += $t }
+        }
+        if ($tokens.Count -eq 0) { return $false }
+
+        foreach ($t in $tokens) {
+            if ($script:DryRunWriteVerbs -contains $t) { return $false }
+        }
+        foreach ($t in $tokens) {
+            if ($readVerbs -contains $t) { return $true }
+        }
+        return $false
+    }
+
+    function Write-WTDryRunBlock {
+        param([string]$Tool, [string[]]$Arguments, [string]$Origin)
+
+        $joined = (($Arguments | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join ' ')
+        $entry = '{0}|{1}|{2}|{3}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $Tool, $Origin, $joined
+        $script:DryRunBlocked.Add($entry) | Out-Null
+        Write-Host "[DRYRUN-BLOCK] $Tool $joined"
+        # Deliberately .NET rather than Add-Content: with $WhatIfPreference = $true
+        # every ShouldProcess cmdlet is a no-op, so Add-Content would silently
+        # write nothing and the log would come back empty.
+        try { [System.IO.File]::AppendAllText($script:DryRunLogPath, $entry + [Environment]::NewLine) } catch { }
+    }
+
+    function Invoke-WTGuarded {
+        param([string]$Tool, [string]$Exe, [string[]]$Arguments, [string]$Origin)
+
+        if (Test-WTDryRunAllowed -Tool $Tool -Arguments $Arguments) {
+            if ($Arguments.Count -gt 0) { & $Exe @Arguments } else { & $Exe }
+            return
+        }
+        Write-WTDryRunBlock -Tool $Tool -Arguments $Arguments -Origin $Origin
+    }
+
+    # ── External tool shadows (see the DEFAULT-DENY note above) ──────────────
+    function netsh      { Invoke-WTGuarded -Tool 'netsh'    -Exe "$env:SystemRoot\System32\netsh.exe"    -Arguments @($args) -Origin 'netsh' }
+    function netsh.exe  { Invoke-WTGuarded -Tool 'netsh'    -Exe "$env:SystemRoot\System32\netsh.exe"    -Arguments @($args) -Origin 'netsh.exe' }
+
+    function powercfg     { Invoke-WTGuarded -Tool 'powercfg' -Exe "$env:SystemRoot\System32\powercfg.exe" -Arguments @($args) -Origin 'powercfg' }
+    function powercfg.exe { Invoke-WTGuarded -Tool 'powercfg' -Exe "$env:SystemRoot\System32\powercfg.exe" -Arguments @($args) -Origin 'powercfg.exe' }
+
+    function bcdedit      { Invoke-WTGuarded -Tool 'bcdedit'  -Exe "$env:SystemRoot\System32\bcdedit.exe"  -Arguments @($args) -Origin 'bcdedit' }
+    function bcdedit.exe  { Invoke-WTGuarded -Tool 'bcdedit'  -Exe "$env:SystemRoot\System32\bcdedit.exe"  -Arguments @($args) -Origin 'bcdedit.exe' }
+
+    function sc.exe       { Invoke-WTGuarded -Tool 'sc'       -Exe "$env:SystemRoot\System32\sc.exe"       -Arguments @($args) -Origin 'sc.exe' }
+    function reg.exe      { Invoke-WTGuarded -Tool 'reg'      -Exe "$env:SystemRoot\System32\reg.exe"      -Arguments @($args) -Origin 'reg.exe' }
+
+    function taskkill      { Invoke-WTGuarded -Tool 'taskkill' -Exe "$env:SystemRoot\System32\taskkill.exe" -Arguments @($args) -Origin 'taskkill' }
+    function taskkill.exe  { Invoke-WTGuarded -Tool 'taskkill' -Exe "$env:SystemRoot\System32\taskkill.exe" -Arguments @($args) -Origin 'taskkill.exe' }
+
+    # The modules owning the cmdlets shadowed below (MMAgent, ScheduledTasks) were
+    # already imported at the top of this block - see the note there for why that
+    # ordering matters. Do not move this section above that import.
+
+    # ── Scheduled-task cmdlets: no WhatIf support, so shadowed outright ──────
+    function Disable-ScheduledTask {
+        [CmdletBinding()]
+        param([string]$TaskPath, [string]$TaskName, [CimInstance]$InputObject)
+        Write-WTDryRunBlock -Tool 'Disable-ScheduledTask' -Arguments @($TaskPath, $TaskName) -Origin 'cmdlet'
+    }
+    function Enable-ScheduledTask {
+        [CmdletBinding()]
+        param([string]$TaskPath, [string]$TaskName, [CimInstance]$InputObject)
+        Write-WTDryRunBlock -Tool 'Enable-ScheduledTask' -Arguments @($TaskPath, $TaskName) -Origin 'cmdlet'
+    }
+    function Set-ScheduledTask {
+        [CmdletBinding()]
+        param([string]$TaskPath, [string]$TaskName, [CimInstance]$InputObject)
+        Write-WTDryRunBlock -Tool 'Set-ScheduledTask' -Arguments @($TaskPath, $TaskName) -Origin 'cmdlet'
+    }
+
+    # ── MMAgent cmdlets: also no WhatIf support, also shadowed outright ──────
+    # Found by walking every mutating-verb cmdlet in this file and asking each one
+    # whether it declares a WhatIf parameter. These four call sites live in the
+    # memory-compression tweak, restore-defaults and restore-point paths, and
+    # $WhatIfPreference does nothing for them - so without these shadows a dry run
+    # would really toggle MemoryCompression.
+    function Disable-MMAgent {
+        [CmdletBinding()]
+        param(
+            [switch]$MemoryCompression,
+            [switch]$PageCombining,
+            [switch]$ApplicationLaunchPrefetching,
+            [switch]$ApplicationPreLaunch,
+            [switch]$OperationAPICompression
+        )
+        Write-WTDryRunBlock -Tool 'Disable-MMAgent' -Arguments @($PSBoundParameters.Keys) -Origin 'cmdlet'
+    }
+    function Enable-MMAgent {
+        [CmdletBinding()]
+        param(
+            [switch]$MemoryCompression,
+            [switch]$PageCombining,
+            [switch]$ApplicationLaunchPrefetching,
+            [switch]$ApplicationPreLaunch,
+            [switch]$OperationAPICompression
+        )
+        Write-WTDryRunBlock -Tool 'Enable-MMAgent' -Arguments @($PSBoundParameters.Keys) -Origin 'cmdlet'
+    }
+
+    # ── Checkpoint-Computer: no WhatIf support, and it must not be missed ────
+    # This one was found the hard way. It is reached from Create-RestorePoint
+    # (`Checkpoint-Computer -Description ... -RestorePointType MODIFY_SETTINGS`),
+    # and it declares no WhatIf parameter, so $WhatIfPreference does nothing for
+    # it. A dry run would therefore really snapshot the machine. It escaped the
+    # first audit pass because its verb is "Checkpoint" - no mutating-verb list
+    # contained that word. tools\test-dryrun-guard.ps1 now derives the requirement
+    # from "which commands lack WhatIf" rather than from a guessed verb list, so
+    # this class of miss cannot recur silently.
+    function Checkpoint-Computer {
+        [CmdletBinding()]
+        param(
+            [string]$Description,
+            [string]$RestorePointType
+        )
+        Write-WTDryRunBlock -Tool 'Checkpoint-Computer' -Arguments @($Description, $RestorePointType) -Origin 'cmdlet'
+    }
+
+    Write-Host "==================================================================" -ForegroundColor Yellow
+    Write-Host "   DRY RUN ACTIVE - no system changes will be made" -ForegroundColor Yellow
+    Write-Host "   Blocked mutations log: $script:DryRunLogPath" -ForegroundColor Yellow
+    Write-Host "==================================================================" -ForegroundColor Yellow
+}
 
 # Add Windows API for RAM WorkingSet trimming
 Add-Type -TypeDefinition @"
@@ -380,6 +613,9 @@ function Get-SystemAudit {
         powerPlan = if ($activePlan) { $activePlan } else { "Ultimate Performance" }
         processCount = $procCount
         isAdmin = $script:IsAdmin
+        # Machine-readable proof that the safety net is engaged, so a harness or an
+        # operator can tell a dry-run instance from a live one without guessing.
+        dryRun = [bool]$DryRun
         tweaks = $tweakBase
     }
 }
@@ -879,6 +1115,22 @@ function Get-ProcessList {
 
 function Purge-StandbyRam {
     $beforeFree = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).FreePhysicalMemory
+    # The trim below is a P/Invoke call - [MemoryTuner]::EmptyWorkingSet - not a
+    # cmdlet and not an external tool, so neither $WhatIfPreference nor the
+    # external-tool shadows can reach it. It is also not a harmless read: it walks
+    # every process on the machine and pushes its working set out to disk, which
+    # the next touch has to fault back in. A dry run must not do that, so it
+    # returns the same shape (so the UI and the harness still parse it) with the
+    # reading untouched, and records the block.
+    if ($DryRun) {
+        Write-WTDryRunBlock -Tool 'Purge-StandbyRam' -Arguments @('MemoryTuner::EmptyWorkingSet') -Origin 'pinvoke'
+        return @{
+            freedMB = 0
+            newFreeGB = [Math]::Round(($beforeFree / 1MB), 2)
+            dryRun = $true
+            blocked = $true
+        }
+    }
     $procs = Get-Process -ErrorAction SilentlyContinue
     foreach ($p in $procs) {
         try {
