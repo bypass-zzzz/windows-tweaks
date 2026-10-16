@@ -28,14 +28,19 @@ async function fetchApiToken() {
 
 (function installTokenFetch() {
     const nativeFetch = window.fetch.bind(window);
-    window.fetch = function (input, init) {
+    window.fetch = async function (input, init) {
         let url = (typeof input === 'string') ? input : (input && input.url) || '';
-        if (API_TOKEN && /^https?:\/\/127\.0\.0\.1:\d+\//i.test(url)) {
-            const opts = init || (typeof input === 'object' && input ? { ...input } : {});
-            const headers = new Headers((opts.headers) || (typeof input === 'object' && input ? input.headers : undefined));
-            headers.set('X-WT-Token', API_TOKEN);
-            opts.headers = headers;
-            return nativeFetch(url, opts);
+        if (/^(https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?|\/api)/i.test(url)) {
+            if (!API_TOKEN && window.electronAPI && window.electronAPI.getApiToken) {
+                try { API_TOKEN = (await window.electronAPI.getApiToken()) || ''; } catch (_) {}
+            }
+            if (API_TOKEN) {
+                const opts = init || (typeof input === 'object' && input ? { ...input } : {});
+                const headers = new Headers((opts.headers) || (typeof input === 'object' && input ? input.headers : undefined));
+                headers.set('X-WT-Token', API_TOKEN);
+                opts.headers = headers;
+                return nativeFetch(input, opts);
+            }
         }
         return nativeFetch(input, init);
     };
@@ -657,9 +662,11 @@ async function setTweak(id, enabled) {
     if (lastTcp && TCP_MAP[id]) lastTcp[TCP_MAP[id]] = !!enabled;
     syncSwitches();
     try {
+        const postHeaders = { "Content-Type": "application/json" };
+        if (API_TOKEN) postHeaders["X-WT-Token"] = API_TOKEN;
         const res = await fetch(`${API_BASE}/api/tweak/set`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: postHeaders,
             body: JSON.stringify({ id, enabled })
         });
         const data = await res.json();

@@ -291,7 +291,8 @@ function Get-SystemAudit {
     if ($null -eq $cpuLoadVal) { $cpuLoadVal = 6 }
 
     # --- Extended gaming/OS audit (all reversible, all exposed as toggles) ---
-    $gameBarAuto = (Get-ItemProperty "HKCU:\SOFTWARE\Microsoft\GameBar" -Name "AllowAutoGameMode" -ErrorAction SilentlyContinue).AllowAutoGameMode
+    $gameBarProps = Get-ItemProperty "HKCU:\SOFTWARE\Microsoft\GameBar" -ErrorAction SilentlyContinue
+    $gameBarAuto = if ($null -ne $gameBarProps -and $null -ne $gameBarProps.AutoGameModeEnabled) { $gameBarProps.AutoGameModeEnabled } else { $gameBarProps.AllowAutoGameMode }
     # Game Mode is on by default - a missing value means enabled, not disabled
     $isGameMode = (($null -eq $gameBarAuto) -or ($gameBarAuto -eq 1))
 
@@ -1493,6 +1494,7 @@ function Apply-SystemTweaks {
     $gbPath = "HKCU:\SOFTWARE\Microsoft\GameBar"
     if (-not (Test-Path $gbPath)) { New-Item -Path $gbPath -Force -ErrorAction SilentlyContinue | Out-Null }
     Set-ItemProperty -Path $gbPath -Name "AllowAutoGameMode" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+    Set-ItemProperty -Path $gbPath -Name "AutoGameModeEnabled" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
     $log += "[OK] Windows Game Mode enabled (prioritizes game threads)"
 
     # 9. Transparency / menu speed / pointer precision (snappier shell)
@@ -1728,7 +1730,9 @@ function Set-TweakState($id, $enabled, $value) {
         "gameMode" {
             $gbPath = "HKCU:\SOFTWARE\Microsoft\GameBar"
             if (-not (Test-Path $gbPath)) { New-Item -Path $gbPath -Force -ErrorAction SilentlyContinue | Out-Null }
-            Set-ItemProperty -Path $gbPath -Name "AllowAutoGameMode" -Value $(if ($on) { 1 } else { 0 }) -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+            $val = if ($on) { 1 } else { 0 }
+            Set-ItemProperty -Path $gbPath -Name "AllowAutoGameMode" -Value $val -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
+            Set-ItemProperty -Path $gbPath -Name "AutoGameModeEnabled" -Value $val -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
             return @{ success = $true; id = $id; enabled = $on }
         }
         "transparency" {
@@ -1934,6 +1938,7 @@ function Restore-Defaults {
     $log += "[RESTORE] Power plan reset to Balanced."
 
     Remove-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\GameBar" -Name "AllowAutoGameMode" -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\GameBar" -Name "AutoGameModeEnabled" -ErrorAction SilentlyContinue
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
     Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -Value "400" -Type String -Force -ErrorAction SilentlyContinue | Out-Null
     Set-ItemProperty -Path "HKCU:\Control Panel\Mouse" -Name "MouseSpeed" -Value "1" -Type String -Force -ErrorAction SilentlyContinue | Out-Null
