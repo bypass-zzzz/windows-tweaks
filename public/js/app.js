@@ -100,6 +100,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     await initApiBase(); // find the backend before the first fetch
 
     initUpdaterFeed();
+    initBackendRecovery();
         
     // Initial Data Fetch
     fetchSystemStatus();
@@ -368,6 +369,32 @@ function initUpdaterFeed() {
         appendLog(`[UPDATE] ${message || status}`);
         if (status === 'progress') return; // progress lives in the terminal, not toasts
         showToast(message || status, status === 'error' ? 'error' : status === 'downloaded' || status === 'available' ? 'success' : 'info');
+    });
+}
+// -----------------------------------------------------------------------------
+// BACKEND RECOVERY FEED
+// The PowerShell backend can die and be restarted under us (main.js retries a
+// bounded number of times). A restarted backend always prints a NEW token and
+// can land on the fallback port, so on 'ready' both are re-resolved and the
+// dashboard refreshes instead of 403ing until the app is relaunched.
+// -----------------------------------------------------------------------------
+function initBackendRecovery() {
+    if (!window.electronAPI || !window.electronAPI.onBackendStatus) return;
+    window.electronAPI.onBackendStatus(async (state, message) => {
+        if (!message) return;
+        if (state === "ready") {
+            API_TOKEN = "";
+            await initApiBase();
+            appendLog(`[BACKEND] ${message}`, "warn");
+            showToast(message, "info");
+            fetchSystemStatus();
+            fetchNetworkStatus();
+        } else if (state === "failed") {
+            appendLog(`[BACKEND] ${message}`, "err");
+            showToast(message, "error");
+        } else {
+            appendLog(`[BACKEND] ${message}`, "warn");
+        }
     });
 }
 // -----------------------------------------------------------------------------

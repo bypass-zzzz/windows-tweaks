@@ -14,6 +14,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
             try { cb(data.status, data.message); } catch (_) {}
         });
     },
+    // Backend lifecycle (main.js restarts the PowerShell backend after a crash).
+    // The renderer re-resolves its base URL and API token when the backend
+    // announces it is ready again.
+    onBackendStatus: (cb) => {
+        ipcRenderer.on('backend-status', (_event, data) => {
+            try { cb(data && data.state, data && data.message); } catch (_) {}
+        });
+    },
 });
 
 // Splash-screen progress channel (splash.html). No Node exposure — event-only.

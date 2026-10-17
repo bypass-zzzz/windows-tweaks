@@ -16,6 +16,24 @@ let psServer = null;
 let apiToken = '';
 let stdoutCarry = '';
 let backendReady = false;
+// ─── Backend crash recovery ───
+// A backend that was serving traffic and then died used to leave the app dead
+// until it was relaunched: every API call failed and nothing retried. It is now
+// restarted with a bounded, widening delay. backendEverReady distinguishes "died
+// mid-session" (recoverable) from "never started" (a config/UAC problem, which
+// keeps the existing message and retry budget of pollBackend).
+let backendEverReady = false;
+let backendStopping = false;
+let pendingRestartNotice = false;
+let backendRestartIndex = 0;
+let backendRestartTimer = null;
+let backendStableTimer = null;
+const BACKEND_RESTART_DELAYS_MS = [1000, 3000, 9000];
+// A backend that stays up this long is healthy again, so the next crash gets the
+// full retry budget rather than inheriting it from an earlier crash loop.
+const BACKEND_STABLE_MS = 30000;
+// True once the app is on its way out; suppresses restarts and update retries.
+let appQuitting = false;
 // True once the splash has dissolved and the real UI has been shown. The main
 // window is created hidden at startup, so the second-instance handler must not
 // raise it before this flips (see the second-instance handler).
@@ -202,6 +220,47 @@ function freePorts(ports, done) {
     });
 }
 
+// Tells the renderer what the backend is doing. The UI re-resolves its base URL
+// and API token on 'ready': a restarted backend prints a new token, and on a
+// port race it can land on the fallback port, so the old pair can be both stale
+// and wrong.
+function notifyBackendStatus(state, message) {
+    try {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('backend-status', { state, message, port: activePort });
+        }
+    } catch (_) {}
+    console.log('[PS Backend]', state, '-', message || '');
+}
+
+// Restart the backend after an unexpected exit, with a bounded number of
+// widening delays (1s, 3s, 9s). Gives up loudly rather than crash-looping
+// forever; a manual relaunch is always still available.
+function scheduleBackendRestart(reason) {
+    if (appQuitting || backendStopping || backendRestartTimer) return;
+    // From the moment the process exits, its token is dead. Clearing it here
+    // makes get-api-token wait for the replacement instead of handing the
+    // renderer a value that is certain to 403.
+    apiToken = '';
+    stdoutCarry = '';
+    if (backendRestartIndex >= BACKEND_RESTART_DELAYS_MS.length) {
+        notifyBackendStatus('failed', `Backend stopped (${reason}) and could not be restarted. Relaunch the app.`);
+        return;
+    }
+    const delay = BACKEND_RESTART_DELAYS_MS[backendRestartIndex];
+    backendRestartIndex++;
+    notifyBackendStatus('restarting', `Backend stopped (${reason}) - restarting in ${Math.round(delay / 1000)}s (attempt ${backendRestartIndex} of ${BACKEND_RESTART_DELAYS_MS.length}).`);
+    backendRestartTimer = setTimeout(() => {
+        backendRestartTimer = null;
+        if (appQuitting || backendStopping) return;
+        pendingRestartNotice = true;
+        // onReady is a no-op here: the UI is already on screen, and the
+        // backend-status event tells the renderer to reconnect.
+        startBackend(sendProgress, () => {});
+    }, delay);
+    if (backendRestartTimer.unref) backendRestartTimer.unref();
+}
+
 function startBackend(onProgress, onReady) {
     onProgress(10, COOL_LINES[0]);
     backendReady = false;
@@ -255,6 +314,11 @@ function startBackend(onProgress, onReady) {
             if (!backendReady) {
                 onProgress(30, 'Backend failed to start — try relaunching as Administrator.');
             }
+            // Died after having served traffic: that is a crash, not a failed
+            // start, and the app can recover from it without a relaunch.
+            if (backendEverReady) {
+                scheduleBackendRestart(`exit code ${code}`);
+            }
         });
 
         pollBackend(onProgress, onReady);
@@ -265,7 +329,24 @@ function pollBackend(onProgress, onReady) {
     let attempts = 0;
     const MAX_ATTEMPTS = 30;
     let readyFired = false;
-    const fireReady = () => { if (!readyFired) { readyFired = true; backendReady = true; onReady(); } };
+    const fireReady = () => {
+        if (readyFired) return;
+        readyFired = true;
+        backendReady = true;
+        backendEverReady = true;
+        // Re-arm the retry budget once the backend has proven it can stay up,
+        // so one flaky crash loop cannot exhaust it for the rest of the session.
+        clearTimeout(backendStableTimer);
+        backendStableTimer = setTimeout(() => { backendRestartIndex = 0; }, BACKEND_STABLE_MS);
+        if (backendStableTimer.unref) backendStableTimer.unref();
+        // The first start reveals the UI through onReady. A restart does not: it
+        // tells the renderer its old token and possibly its old port are stale.
+        if (pendingRestartNotice) {
+            pendingRestartNotice = false;
+            notifyBackendStatus('ready', 'Backend restarted - reconnected.');
+        }
+        onReady();
+    };
 
     const tick = () => {
         attempts++;
@@ -296,6 +377,11 @@ function pollBackend(onProgress, onReady) {
                 if (finished) return;
                 finished = true;
                 if (ready) {
+                    // The ports are probed in preference order and settled is
+                    // shared, so the preferred port wins even when both answer
+                    // within the same tick (a stale backend on PORT would only
+                    // 403, but the winner must not depend on that).
+                    if (settled) return;
                     activePort = port;
                     settled = true;
                     fireReady();
@@ -327,6 +413,14 @@ function pollBackend(onProgress, onReady) {
 }
 
 function killBackend() {
+    // Deliberate shutdown: never restart what we just killed (the window was
+    // closed, or the app is quitting). Repeat calls are no-ops.
+    if (backendStopping && !psServer) return;
+    backendStopping = true;
+    clearTimeout(backendRestartTimer);
+    backendRestartTimer = null;
+    clearTimeout(backendStableTimer);
+    backendStableTimer = null;
     if (psServer) {
         try { psServer.kill('SIGTERM'); } catch (_) {}
         // Kill any leftover listeners on both ports; guard against PID 0 and
@@ -360,7 +454,41 @@ function updaterNotify(status, message) {
 
 let autoUpdateInitialized = false;
 
-function checkForUpdates(manual) {
+// Automatic checks used to be strictly one-shot: updateCheckedOnce was set
+// before the call, so a single network blip at launch meant no update
+// notification for the rest of the session. A failed *check* now retries twice
+// with a widening delay; a manual check always starts fresh and cancels any
+// pending retry (see checkForUpdates).
+const UPDATE_RETRY_DELAYS_MS = [15000, 45000];
+let updateRetryIndex = 0;
+let updateRetryTimer = null;
+let updateStage = 'idle'; // 'idle' | 'check' (automatic) | 'check-manual' | 'download'
+
+function clearUpdateRetry() {
+    updateRetryIndex = 0;
+    if (updateRetryTimer) { clearTimeout(updateRetryTimer); updateRetryTimer = null; }
+}
+
+function scheduleUpdateRetry() {
+    if (appQuitting || updateRetryTimer) return;
+    // Only a failed *check* is retried: a failed download would re-run the whole
+    // check and pull the payload again, which is not what a retry should mean.
+    if (updateStage !== 'check') return;
+    if (updateRetryIndex >= UPDATE_RETRY_DELAYS_MS.length) {
+        updaterNotify('idle', 'Update check could not reach GitHub. Use "Check for updates" to try again.');
+        return;
+    }
+    const delay = UPDATE_RETRY_DELAYS_MS[updateRetryIndex];
+    updateRetryIndex++;
+    updaterNotify('retry', `Update check failed - retrying in ${Math.round(delay / 1000)}s…`);
+    updateRetryTimer = setTimeout(() => {
+        updateRetryTimer = null;
+        runUpdateCheck(false);
+    }, delay);
+    if (updateRetryTimer.unref) updateRetryTimer.unref();
+}
+
+function runUpdateCheck(manual) {
     if (!updater) {
         if (manual) updaterNotify('error', 'Updater not available in this build.');
         return;
@@ -369,24 +497,33 @@ function checkForUpdates(manual) {
         if (manual) updaterNotify('idle', 'Dev mode — updates only check in packaged builds.');
         return;
     }
-    if (!manual && updateCheckedOnce) {
-        return;
-    }
-    if (!manual) {
-        updateCheckedOnce = true;
-    }
     if (updateBusy) {
         if (manual) updaterNotify('busy', 'Update check already running…');
         return;
     }
     updateBusy = true;
+    // A manual check is labelled separately so its own failure is not
+    // auto-retried: the user is right there and can press the button again.
+    updateStage = manual ? 'check-manual' : 'check';
     try {
         const p = updater.checkForUpdates();
-        if (p && p.catch) p.catch((e) => { updateBusy = false; updaterNotify('error', (e && e.message) || 'Update check failed.'); });
+        if (p && p.catch) p.catch((e) => { updateBusy = false; updaterNotify('error', (e && e.message) || 'Update check failed.'); scheduleUpdateRetry(); });
     } catch (e) {
         updateBusy = false;
         updaterNotify('error', (e && e.message) || 'Update check failed.');
+        scheduleUpdateRetry();
     }
+}
+
+function checkForUpdates(manual) {
+    if (manual) {
+        clearUpdateRetry();
+    } else if (updateCheckedOnce) {
+        return;
+    } else {
+        updateCheckedOnce = true;
+    }
+    runUpdateCheck(manual);
 }
 
 // Private release repo access is configured via the publish.token field in
@@ -402,7 +539,7 @@ function initAutoUpdate() {
     updater.autoInstallOnAppQuit = true;
 
     updater.on('checking-for-update', () => updaterNotify('checking', 'Checking for updates…'));
-    updater.on('update-available', (info) => updaterNotify('available', `Update v${info.version} found — downloading…`));
+    updater.on('update-available', (info) => { updateStage = 'download'; updaterNotify('available', `Update v${info.version} found — downloading…`); });
     updater.on('update-not-available', () => { updateBusy = false; updaterNotify('idle', 'Already on the latest version.'); });
     updater.on('download-progress', (p) => {
         updaterNotify('progress', `Downloading update… ${Math.round(p.percent)}%`);
@@ -423,15 +560,19 @@ function initAutoUpdate() {
             }).catch(() => {});
         } catch (_) {}
     });
-    updater.on('error', (e) => { updateBusy = false; updaterNotify('error', (e && e.message) || 'Updater error.'); });
+    updater.on('error', (e) => {
+        updateBusy = false;
+        updaterNotify('error', (e && e.message) || 'Updater error.');
+        // The promise rejection and this event both fire for a failed check;
+        // scheduling is idempotent while a retry is pending.
+        scheduleUpdateRetry();
+    });
 
-    // Single quiet automatic check 3 seconds after launch
-    setTimeout(() => {
-        if (!updateCheckedOnce) {
-            updateCheckedOnce = true;
-            checkForUpdates(false);
-        }
-    }, 3000);
+    // Single quiet automatic check 3 seconds after launch. The one-shot flag is
+    // owned by checkForUpdates: setting it here as well made the call return on
+    // its own guard before it ever reached the updater, so the launch check
+    // never actually ran (only the manual button did).
+    setTimeout(() => checkForUpdates(false), 3000);
 }
 
 // ─── IPC Handlers ───
@@ -559,6 +700,16 @@ app.whenReady().then(() => {
         // Failsafe: never trap the user on the splash
         setTimeout(showMain, 9000);
     });
+});
+
+app.on('before-quit', () => {
+    // Suppress restarts and update retries once the app is on its way out, and
+    // take the child down with us: quitAndInstall() (and any other quit that
+    // does not close the window first) would otherwise leave an orphaned backend
+    // holding the port.
+    appQuitting = true;
+    clearUpdateRetry();
+    killBackend();
 });
 
 app.on('window-all-closed', () => {

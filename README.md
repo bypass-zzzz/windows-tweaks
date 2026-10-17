@@ -185,9 +185,10 @@ The repo carries the harnesses that were used to prove the app's behavior, so fu
 
 | Tool | What it proves |
 |---|---|
-| `tools/test-endpoints-dryrun.ps1` | Boots a dry-run backend and exercises the endpoint surface (52 checks); safe on any machine because every write is blocked. |
+| `tools/test-endpoints-dryrun.ps1` | Boots a dry-run backend and exercises the endpoint surface (65 checks); safe on any machine because every write is blocked. |
 | `tools/test-list-truth.ps1` | Audits `/api/services`, `/api/tasks` and `/api/startup` against machine truth read independently of the app (89 checks); refuses to POST unless the dry-run banner is seen. |
 | `tools/test-dryrun-guard.ps1` | Re-derives the list of mutating cmdlets that lack `WhatIf` support from the source and fails if a new one is added without a matching shadow (51 checks). |
+| `tools/test-main-resilience.js` | Node harness that loads the real `main.js` with Electron stubbed and a fake clock, then proves backend crash recovery (restart ladder, new token, reconnect port, bounded give-up, no restart on shutdown) and the auto-update retry policy (42 checks). No window, port, or registry access. |
 | `tools/mutation-inventory.ps1` | Inventories every mutation call site in `server.ps1` (cmdlets and external tools) to keep the dry-run guard complete. |
 | `tools/release.ps1` | The gated release runbook: branch and clean-tree check, `GH_TOKEN` validation, push main, create and push the version tag, then `npm run release`. |
 
