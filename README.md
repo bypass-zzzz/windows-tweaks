@@ -142,7 +142,7 @@ Desktop app = Electron shell + a local PowerShell engine. Everything runs on the
                               v
 +--------------------------------------------------------------+
 | PowerShell backend (server.ps1)                              |
-|  - System.Net.HttpListener on 127.0.0.1:48921, falling      |
+|  - System.Net.HttpListener on 127.0.0.1:48921, falling       |
 |    back to 48922 when the port is taken                      |
 |  - serves public/ (the UI) + /api/* JSON endpoints           |
 |  - registry / BCD / services / tasks / netsh / powercfg      |
