@@ -1566,8 +1566,6 @@ if (btnApplyGamingMtu) btnApplyGamingMtu.addEventListener("click", () => applyMt
     // Services tab filter: 273 rows needs a way to narrow it down.
     const svcSearch = document.getElementById("servicesSearch");
     if (svcSearch) svcSearch.addEventListener("input", renderServiceGroups);
-    const svcOnlyMod = document.getElementById("servicesOnlyModifiable");
-    if (svcOnlyMod) svcOnlyMod.addEventListener("change", renderServiceGroups);
 
     // Per-group bulk buttons are delegated, because the group markup is rebuilt
     // on every refresh and on every filter keystroke.
@@ -1823,16 +1821,14 @@ function renderServiceGroups() {
     if (!host) return;
 
     const q = ((document.getElementById("servicesSearch") || {}).value || "").trim().toLowerCase();
-    const onlyMod = (document.getElementById("servicesOnlyModifiable") || {}).checked;
     const countEl = document.getElementById("servicesCount");
 
     const match = s => {
-        if (onlyMod && !s.curated) return false;
         if (!q) return true;
         return (s.name + " " + (s.displayName || "") + " " + (s.description || "") + " " + (s.groupTitle || "")).toLowerCase().indexOf(q) !== -1;
     };
-    // The server already returns only changeable services; this is belt-and-braces
-    // so a read-only row can never reach the UI even if the payload changes.
+    // The services payload already contains only changeable services, so the
+    // text filter is the only gate the list needs.
 
     // Keep the server's group ordering (it already sorts by its own group table),
     // so group here without re-sorting the groups themselves.
