@@ -1489,22 +1489,35 @@ input:checked + .slider:before {
     transition-duration: var(--dur-instant);
 }
 
-/* Tweak rows and cards lift on hover and settle when pressed. transform is
-   safe here because the row is a flex child with no layout-affecting side
-   effects, and the caution block inside is never hidden or faded. */
+/* Cards lift on hover and settle when pressed. Tweak rows must NOT move:
+   a transform changes the hit box too, so with the pointer parked on the
+   absolute bottom edge of a row the row lifts out from under it, hover
+   drops, the row settles back and the cycle repeats - the bottom-edge
+   hover flicker. Rows get a paint-only lift instead (shadow + the
+   background/border hover above), which cannot change their geometry. */
 .tweak-item,
 .card {
     transition-property: background, border-color, transform, box-shadow;
     transition-duration: var(--dur-base);
     transition-timing-function: var(--ease-out-expo);
 }
-.tweak-item:hover,
 .card:hover {
     transform: translateY(var(--lift));
 }
-.tweak-item:active,
+.tweak-item:hover {
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28);
+}
+/* The advanced marker is an inset stripe on the same property; keep it
+   visible while a row is hovered. */
+.tweak-item.is-advanced:hover {
+    box-shadow: inset 3px 0 0 -1px var(--accent-amber), 0 6px 16px rgba(0, 0, 0, 0.28);
+}
 .card:active {
     transform: translateY(0) scale(var(--press-scale));
+    transition-duration: var(--dur-instant);
+}
+.tweak-item:active {
+    background: rgba(255, 255, 255, 0.09);
     transition-duration: var(--dur-instant);
 }
 
