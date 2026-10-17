@@ -596,23 +596,81 @@ function Get-TweakWriteResult($id, $on, [switch]$Reboot) {
     return $result
 }
 
+# -----------------------------------------------------------------------------
+# STATIC AUDIT CACHE
+# /api/status is polled every 2000 ms, and most of what it reports only moves
+# when this app writes something: the ~25 static tweak switches (a bcdedit, four
+# netsh calls, two powercfg queries, a WMI NIC read), the 92-entry registry
+# catalog (~100 ms of registry reads), the bloated-service probe, the RAM sticks
+# and the GPU list. Re-reading all of that every tick cost ~346 ms warm for
+# values that had not changed. The live counters (CPU load, free RAM, process
+# count) stay per-request; everything else is cached and invalidated the moment a
+# POST arrives, because a POST is the only way this app moves those values. A TTL
+# bounds staleness for anything changed outside the app.
+# -----------------------------------------------------------------------------
+$script:AuditGeneration = 0
+$script:AuditCache = @{}
+$script:AuditCacheTtlMs = 20000
+$script:AuditCacheHits = 0
+
+function Reset-AuditCache { $script:AuditGeneration++ }
+
+function Get-AuditCached([string]$key, [scriptblock]$producer) {
+    $entry = $script:AuditCache[$key]
+    if ($entry -and $entry.Generation -eq $script:AuditGeneration -and
+        ([DateTime]::UtcNow - $entry.At).TotalMilliseconds -lt $script:AuditCacheTtlMs) {
+        $script:AuditCacheHits++
+        return $entry.Value
+    }
+    $value = & $producer
+    # Do not cache a failed read - Get-StaticHw makes the same call: one WMI
+    # hiccup must not pin "unknown" for the life of the cache on a machine that
+    # can answer. An empty collection and $null both mean "no answer" here.
+    $hasContent = ($null -ne $value)
+    if ($hasContent -and $value -is [System.Collections.ICollection]) { $hasContent = ($value.Count -gt 0) }
+    if ($hasContent) {
+        $script:AuditCache[$key] = @{ Value = $value; Generation = $script:AuditGeneration; At = [DateTime]::UtcNow }
+    }
+    return $value
+}
+
 function Get-SystemAudit {
+    # Per-request hit counter (the dispatcher serves one request at a time, so
+    # this cannot interleave). Reported in the payload so a harness can prove a
+    # repeat poll is cached and a post-write poll is not.
+    $script:AuditCacheHits = 0
     # Perf: the two slow WMI calls here used to be Win32_Processor (~1.0 s,
     # only for LoadPercentage) and Win32_OperatingSystem (~0.3 s, only for
     # FreePhysicalMemory). Both now come from native counters. Identity strings
     # are pulled once and cached; Win32_ComputerSystem was assigned and never
     # read, so it is gone entirely.
     $hw = Get-StaticHw
-    $gpus = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
-    $ram = Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue
-
-    $totalRamBytes = ($ram | Measure-Object -Property Capacity -Sum).Sum
+    # The GPU list and the RAM sticks are hardware identity, not live telemetry:
+    # they change when a driver is updated or a stick is added, so they live in
+    # the cache with the rest of the static half.
+    $gpuCache = Get-AuditCached 'gpu' {
+        $g = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
+        if ($g.Count -gt 0) { $g } else { $null }
+    }
+    $gpus = if ($gpuCache) { @($gpuCache) } else { @() }
+    $ramBlob = Get-AuditCached 'ram' {
+        $sticks = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue)
+        if ($sticks.Count -eq 0) { return $null }
+        $bytes = ($sticks | Measure-Object -Property Capacity -Sum).Sum
+        $speed = ($sticks | Select-Object -First 1).Speed
+        if ($null -eq $speed -or $speed -le 0) { $speed = $null }
+        @{
+            TotalGB = if ($bytes -and $bytes -gt 0) { [Math]::Round($bytes / 1GB, 1) } else { $null }
+            Speed = $speed
+            Sticks = $sticks.Count
+        }
+    }
     # Every fallback in this block used to be an invented measurement - 32 GB total,
     # 20 GB free, 8.0 GB used, 6000 MT/s - and on a machine where the query fails those
     # numbers were displayed as though they had been read. That is worse than showing
     # nothing: the entire value of this app is that the numbers are real. Unknown is
     # $null now, and the UI renders it as a dash.
-    $totalRamGB = if ($totalRamBytes -and $totalRamBytes -gt 0) { [Math]::Round($totalRamBytes / 1GB, 1) } else { $null }
+    $totalRamGB = if ($ramBlob) { $ramBlob.TotalGB } else { $null }
     $ramSample = Get-RamSample
     $freeRamGB = if ($ramSample) { $ramSample.FreeGB } else {
         $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
@@ -627,8 +685,7 @@ function Get-SystemAudit {
         if ($usedRamGB -lt 0) { $usedRamGB = 0.0 }
         if ($totalRamGB -gt 0) { $ramPercent = [Math]::Round(($usedRamGB / $totalRamGB) * 100, 1) }
     }
-    $ramSpeed = ($ram | Select-Object -First 1).Speed
-    if ($null -eq $ramSpeed -or $ramSpeed -le 0) { $ramSpeed = $null }
+    $ramSpeed = if ($ramBlob) { $ramBlob.Speed } else { $null }
 
     $gpuList = @()
     foreach ($g in $gpus) {
@@ -664,15 +721,23 @@ function Get-SystemAudit {
     # "debloated" means. Zero services found is "the query failed", not "everything is
     # disabled": that is $null and renders as a dash.
     $bloatNames = @($script:BloatTargets | ForEach-Object { $_.Name })
-    $bloatLive = @(Get-Service -Name $bloatNames -ErrorAction SilentlyContinue)
-    $bloatKnown = ($bloatLive.Count -gt 0)
-    $bloatOn = @($bloatLive | Where-Object { "$($_.StartType)" -ne "Disabled" })
-    $telemetryOn = @($bloatOn | Where-Object { (Get-ServiceGroupName $_.Name) -eq "telemetry" })
+    $bloat = Get-AuditCached 'bloat' {
+        $live = @(Get-Service -Name $bloatNames -ErrorAction SilentlyContinue)
+        if ($live.Count -eq 0) { return $null }
+        $on = @($live | Where-Object { "$($_.StartType)" -ne "Disabled" })
+        @{
+            On = $on.Count
+            Total = $bloatNames.Count
+            TelemetryOn = @($on | Where-Object { (Get-ServiceGroupName $_.Name) -eq "telemetry" }).Count
+        }
+    }
 
     # Every static "is it applied" flag comes from Get-StaticTweakStates - one
     # definition shared with the write path, so this payload and a write's
-    # read-back cannot disagree.
-    $staticStates = Get-StaticTweakStates -GpuNames $gpuNames
+    # read-back cannot disagree. Cached: it costs a bcdedit, four netsh calls,
+    # two powercfg queries and a WMI NIC read, and none of those move between two
+    # 2 s polls unless something writes.
+    $staticStates = Get-AuditCached 'staticStates' { Get-StaticTweakStates -GpuNames $gpuNames }
 
     $tweakBase = @{
         hags = $staticStates.hags
@@ -707,15 +772,20 @@ function Get-SystemAudit {
         tcpPorts = $staticStates.tcpPorts
         # Computed, not asserted (see the note above the bloat probe). These drive the
         # dashboard's "Telemetry Disabled" line and "Debloated" badge.
-        debloated = $(if ($bloatKnown) { $bloatOn.Count -eq 0 } else { $null })
-        debloatRemaining = $(if ($bloatKnown) { $bloatOn.Count } else { $null })
+        debloated = $(if ($bloat) { $bloat.On -eq 0 } else { $null })
+        debloatRemaining = $(if ($bloat) { $bloat.On } else { $null })
         debloatTotal = $bloatNames.Count
-        telemetryDisabled = $(if ($bloatKnown) { $telemetryOn.Count -eq 0 } else { $null })
-        telemetryRemaining = $(if ($bloatKnown) { $telemetryOn.Count } else { $null })
+        telemetryDisabled = $(if ($bloat) { $bloat.TelemetryOn -eq 0 } else { $null })
+        telemetryRemaining = $(if ($bloat) { $bloat.TelemetryOn } else { $null })
     }
-    foreach ($def in $script:RegTweaks) {
-        $tweakBase[$def.id] = Get-RegTweakState $def
+    # The 92-entry catalog is the other half of the expensive poll: ~100 ms of
+    # registry reads per request, for values this app is the only writer of.
+    $regStates = Get-AuditCached 'regStates' {
+        $s = @{}
+        foreach ($def in $script:RegTweaks) { $s[$def.id] = Get-RegTweakState $def }
+        $s
     }
+    foreach ($k in $regStates.Keys) { $tweakBase[$k] = $regStates[$k] }
 
     return @{
         os = $hw.OsLabel
@@ -727,7 +797,7 @@ function Get-SystemAudit {
             free = $freeRamGB
             percent = $ramPercent
             speed = $ramSpeed
-            sticks = if ($ram.Count) { $ram.Count } else { $null }
+            sticks = if ($ramBlob) { $ramBlob.Sticks } else { $null }
         }
         gpus = $gpuList
         powerPlan = if ($activePlan) { $activePlan } else { $null }
@@ -736,6 +806,10 @@ function Get-SystemAudit {
         # Machine-readable proof that the safety net is engaged, so a harness or an
         # operator can tell a dry-run instance from a live one without guessing.
         dryRun = [bool]$DryRun
+        # Also machine-readable: 'cache' means this poll was answered from the
+        # static half, 'fresh' means it re-read. A POST moves the generation, so a
+        # write is always followed by a fresh read.
+        cache = @{ generation = $script:AuditGeneration; served = $(if ($script:AuditCacheHits -gt 0) { "cache" } else { "fresh" }) }
         tweaks = $tweakBase
     }
 }
@@ -3030,6 +3104,11 @@ while ($listener.IsListening) {
             }
 
             $jsonOutput = $null
+
+            # Any POST can move the machine, so the cached static half of the
+            # audit is stale from here on and the next /api/status re-reads it.
+            # The 2 s poll is a GET and keeps being answered from the cache.
+            if ($request.HttpMethod -eq "POST") { Reset-AuditCache }
 
             switch ($rawUrl) {
                 "/api/status" {

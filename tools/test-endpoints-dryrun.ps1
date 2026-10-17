@@ -364,6 +364,41 @@ foreach ($m in $idempotent) {
 $guardProven = ($attempted -gt 0 -and $intercepted -eq $attempted)
 Assert-True "the guard is demonstrably live in this exact process" $guardProven "$intercepted of $attempted mutations were intercepted"
 
+# ── Audit cache behaviour ────────────────────────────────────────────────────
+Section "audit cache (cheap repeats, fresh after a write)"
+$cache1 = Parse-Json -Text (Invoke-Api -Path '/api/status').text
+$cache2 = Parse-Json -Text (Invoke-Api -Path '/api/status').text
+Assert-True "the second poll is answered from the cached static half" ($cache2.cache.served -eq 'cache') "served=$($cache2.cache.served)"
+Assert-True "a cached poll does not move the cache generation" ($cache2.cache.generation -eq $cache1.cache.generation) "generation $($cache1.cache.generation) -> $($cache2.cache.generation)"
+# The cache is only worth having if a cached poll still equals the machine.
+# /api/tweak/catalog is a separate read path that hits the registry directly, so
+# comparing a CACHED /api/status against it proves the cached half is not stale.
+$catNow = @{}
+foreach ($t in @(Parse-Json -Text (Invoke-Api -Path '/api/tweak/catalog').text)) { if ($t.id) { $catNow[$t.id] = $t.active } }
+$cacheMismatch = @()
+foreach ($k in $catNow.Keys) {
+    $dash = $cache2.tweaks.$k
+    if ($null -eq $dash) { $cacheMismatch += "$k (dashboard unknown)"; continue }
+    if ([bool]$dash -ne [bool]$catNow[$k]) { $cacheMismatch += "$k (dashboard=$dash catalog=$($catNow[$k]))" }
+}
+Assert-True ("a cached poll matches the uncached catalog for all {0} tweak states" -f $catNow.Count) ($cacheMismatch.Count -eq 0) ($cacheMismatch -join ' ; ')
+# A POST is the only way the app moves the values the cache holds, so a POST has
+# to invalidate. The payload is the same idempotent one used above, so the call
+# cannot change anything even if the guard were not intercepting.
+if ($tweak) {
+    $null = Invoke-Api -Path '/api/tweak/set' -Body ((@{ id = $tweak.id; enabled = [bool]$tweak.active }) | ConvertTo-Json -Compress)
+    $cache3 = Parse-Json -Text (Invoke-Api -Path '/api/status').text
+    Assert-True "a write invalidates the cache (the next poll re-reads)" ($cache3.cache.generation -gt $cache2.cache.generation -and $cache3.cache.served -eq 'fresh') "generation $($cache2.cache.generation) -> $($cache3.cache.generation), served=$($cache3.cache.served)"
+} else {
+    Write-Host "  SKIP  no catalog tweak available for the invalidation POST" -ForegroundColor DarkGray
+}
+# Caching is only safe if the cached values are still the machine's. The final
+# section re-derives all 92 tweak states; this pins the split directly.
+$statusNow = Parse-Json -Text (Invoke-Api -Path '/api/status').text
+$hagsDirect = ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name HwSchMode -ErrorAction SilentlyContinue).HwSchMode -eq 2)
+Assert-True "a cached poll still reports the machine's real HAGS state" ([bool]$statusNow.tweaks.hags -eq [bool]$hagsDirect) "audit=$($statusNow.tweaks.hags) direct=$hagsDirect"
+Assert-True "live counters are still computed on a cached poll" ($null -ne $statusNow.processCount) "processCount=$($statusNow.processCount)"
+
 # Validation paths - these deliberately attempt no change, and they are the
 # security-relevant ones. /api/services/group in particular used to invert its own
 # action (every "Disable all" silently performed a RESTORE) because it read
