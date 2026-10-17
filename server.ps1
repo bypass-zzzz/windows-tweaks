@@ -385,9 +385,12 @@ function Get-StaticHw {
 # HELPER FUNCTIONS: SYSTEM & NETWORK AUDITING
 # -----------------------------------------------------------------------------
 
-function Get-PowerAcValue($sub, $setting) {
+function Get-PowerSettingValue($sub, $setting, [switch]$Dc) {
+    # One reader for both scopes: a value that is checked on AC and DC cannot be
+    # parsed one way on one and another way on the other.
+    $scope = if ($Dc) { 'DC' } else { 'AC' }
     $out = (& powercfg.exe /query SCHEME_CURRENT $sub $setting 2>$null) | Out-String
-    $m = [regex]::Match($out, 'Current AC Power Setting Index:\s*0x([0-9a-fA-F]+)')
+    $m = [regex]::Match($out, "Current $scope Power Setting Index:\s*0x([0-9a-fA-F]+)")
     if ($m.Success) { return [Convert]::ToInt32($m.Groups[1].Value, 16) } else { return $null }
 }
 
@@ -505,8 +508,8 @@ function Get-StaticTweakStates {
 
     # CPU boost - powercfg can fail to answer, and "no answer" is not the same
     # claim as "boost is capped for background work".
-    $cpuMinAc = Get-PowerAcValue "SUB_PROCESSOR" "PROCTHROTTLEMIN"
-    $cpuMaxAc = Get-PowerAcValue "SUB_PROCESSOR" "PROCTHROTTLEMAX"
+    $cpuMinAc = Get-PowerSettingValue "SUB_PROCESSOR" "PROCTHROTTLEMIN"
+    $cpuMaxAc = Get-PowerSettingValue "SUB_PROCESSOR" "PROCTHROTTLEMAX"
     $out.cpuBoost = if ($null -ne $cpuMinAc -and $null -ne $cpuMaxAc) { ($cpuMinAc -eq 100 -and $cpuMaxAc -eq 100) } else { $null }
 
     # NVIDIA RID, gated on an NVIDIA GPU actually being present
@@ -1857,19 +1860,19 @@ function Apply-NetworkTweaks {
 }
 
 function Apply-SystemTweaks {
-    $log = @()
+    $logLines = New-Object System.Collections.Generic.List[string]
+    $checks = New-Object System.Collections.Generic.List[hashtable]
 
+    # ── 1. WRITES ────────────────────────────────────────────────────────────
     # 1. HAGS
     $gfxPath = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
     if (-not (Test-Path $gfxPath)) { New-Item -Path $gfxPath -Force -ErrorAction SilentlyContinue | Out-Null }
     Set-ItemProperty -Path $gfxPath -Name "HwSchMode" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-    $log += "[OK] Hardware-Accelerated GPU Scheduling (HAGS) enabled (HwSchMode = 2)"
 
     # 2. Windowed Game Optimizations
     $dxPath = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
     if (-not (Test-Path $dxPath)) { New-Item -Path $dxPath -Force -ErrorAction SilentlyContinue | Out-Null }
     Set-ItemProperty -Path $dxPath -Name "AutoOptimizationsEnabled" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-    $log += "[OK] Windowed Game Auto Optimizations enabled (Lowest display lag)"
 
     # 3. High Precision Timers & BCD
     & bcdedit.exe /set disabledynamictick yes 2>$null | Out-Null
@@ -1877,23 +1880,21 @@ function Apply-SystemTweaks {
     & bcdedit.exe /set useplatformtick yes 2>$null | Out-Null
     & bcdedit.exe /deletevalue numproc 2>$null | Out-Null
     & bcdedit.exe /deletevalue truncatememory 2>$null | Out-Null
-    $log += "[OK] Dynamic Tick Disabled (prevents clock drift & hitching)"
-    $log += "[OK] Native Invariant TSC enforced via useplatformtick"
-    $log += "[OK] BCD CPU core limitations & memory caps cleared"
 
     # 4. Kernel RAM Pinning
     $mmPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
     Set-ItemProperty -Path $mmPath -Name "DisablePagingExecutive" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
     Set-ItemProperty -Path $mmPath -Name "LargeSystemCache" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-    $log += "[OK] Windows Kernel & Drivers locked in physical RAM (Zero SSD paging hitches)"
 
     # 5. GPU Interrupt Priority
     $gpuDev = Get-PnpDevice -Class Display -Status OK -ErrorAction SilentlyContinue | Select-Object -First 1
+    $gpuPrioKey = $null
     if ($gpuDev) {
         $gpuId = $gpuDev.DeviceID
         $gpuReg = "HKLM\SYSTEM\CurrentControlSet\Enum\$gpuId\Device Parameters\Interrupt Management\Affinity Policy"
         & reg.exe add $gpuReg /v "DevicePriority" /t REG_DWORD /d 1 /f 2>$null | Out-Null
-        $log += "[OK] GPU ($($gpuDev.FriendlyName)) Interrupt Priority set to HIGH"
+        # Same key in PowerShell-drive spelling, for the read-back pass below.
+        $gpuPrioKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$gpuId\Device Parameters\Interrupt Management\Affinity Policy"
     }
 
     # 6. Power scheme (Hybred preferred) & disable USB sleep
@@ -1903,17 +1904,10 @@ function Apply-SystemTweaks {
     # 15 ms -> 5000 ms, Interrupt Steering Mode 0 -> 3).
     # NOT suitable for a laptop with bad cooling - no CPU idling means more heat.
     $prefScheme = Get-PreferredPowerScheme
-    if ($prefScheme) {
-        & powercfg.exe /setactive $prefScheme.Guid 2>$null | Out-Null
-        $schemeAfter = (& powercfg.exe /getactivescheme 2>$null) -join ""
-        if ($schemeAfter -match [regex]::Escape($prefScheme.Guid)) { $log += "[OK] Activated power scheme: $($prefScheme.Name) (verified)" }
-        else { $log += "[FAIL] Power scheme did not switch to $($prefScheme.Name)" }
-        if ($prefScheme.Name -match "Hybr[ei]d") { $log += "[WARN] Hybred disables CPU idle states - faster, but higher idle heat and fan noise. Not for a laptop with poor cooling." }
-    } else { $log += "[SKIP] No Hybred / Ultimate / High performance scheme present" }
+    if ($prefScheme) { & powercfg.exe /setactive $prefScheme.Guid 2>$null | Out-Null }
     & powercfg.exe /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>$null | Out-Null
     & powercfg.exe /setdcvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>$null | Out-Null
     & powercfg.exe /setactive SCHEME_CURRENT 2>$null | Out-Null
-    $log += "[OK] USB Selective Suspend disabled (Zero input device wake-up latency)"
 
     # 7. GameDVR
     $gcsPath = "HKCU:\System\GameConfigStore"
@@ -1924,14 +1918,12 @@ function Apply-SystemTweaks {
     $gdvrPolicy = "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR"
     if (-not (Test-Path $gdvrPolicy)) { New-Item -Path $gdvrPolicy -Force -ErrorAction SilentlyContinue | Out-Null }
     Set-ItemProperty -Path $gdvrPolicy -Name "AppCaptureEnabled" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-    $log += "[OK] Background GameDVR & AppCapture disabled (Freed GPU/CPU overhead)"
 
     # 8. Game Mode
     $gbPath = "HKCU:\SOFTWARE\Microsoft\GameBar"
     if (-not (Test-Path $gbPath)) { New-Item -Path $gbPath -Force -ErrorAction SilentlyContinue | Out-Null }
     Set-ItemProperty -Path $gbPath -Name "AllowAutoGameMode" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
     Set-ItemProperty -Path $gbPath -Name "AutoGameModeEnabled" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-    $log += "[OK] Windows Game Mode enabled (prioritizes game threads)"
 
     # 9. Transparency / menu speed / pointer precision (snappier shell)
     $tpPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
@@ -1941,7 +1933,6 @@ function Apply-SystemTweaks {
     Set-ItemProperty -Path "HKCU:\Control Panel\Mouse" -Name "MouseSpeed" -Value "0" -Type String -Force -ErrorAction SilentlyContinue | Out-Null
     Set-ItemProperty -Path "HKCU:\Control Panel\Mouse" -Name "MouseThreshold1" -Value "0" -Type String -Force -ErrorAction SilentlyContinue | Out-Null
     Set-ItemProperty -Path "HKCU:\Control Panel\Mouse" -Name "MouseThreshold2" -Value "0" -Type String -Force -ErrorAction SilentlyContinue | Out-Null
-    $log += "[OK] Transparency off, instant menus, raw mouse input (no pointer acceleration)"
 
     # 10. Memory compression off; CPU frequency floor left alone
     Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue | Out-Null
@@ -1955,7 +1946,6 @@ function Apply-SystemTweaks {
     & powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100 2>$null | Out-Null
     & powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100 2>$null | Out-Null
     & powercfg.exe /setactive SCHEME_CURRENT 2>$null | Out-Null
-    $log += "[OK] Memory Compression disabled, CPU max frequency left at 100% (min floor untouched)"
 
     # 11. NVIDIA low-latency flag (only when an NVIDIA GPU is present)
     $nv = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "NVIDIA" }
@@ -1963,10 +1953,118 @@ function Apply-SystemTweaks {
         $fts = "HKLM:\SYSTEM\CurrentControlSet\Services\nvlddmkm\FTS"
         if (-not (Test-Path $fts)) { New-Item -Path $fts -Force -ErrorAction SilentlyContinue | Out-Null }
         Set-ItemProperty -Path $fts -Name "EnableRID61684" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue | Out-Null
-        $log += "[OK] NVIDIA ultra-low-latency driver flag set (EnableRID61684)"
     }
 
-    return @{ success = $true; logs = $log }
+    # ── 2. READ-BACK PASS ────────────────────────────────────────────────────
+    # Every line below is built from what the machine reports AFTER the writes,
+    # never from what the writes intended. This is the same rule the page's
+    # individual switches already follow (see Get-TweakWriteResult): this file
+    # runs with $ErrorActionPreference = SilentlyContinue, and bcdedit /
+    # powercfg / reg.exe are separate processes that fail without raising
+    # anything a caller could catch - so "no exception" was never evidence that
+    # a value landed. The previous version of this function proved it by logging
+    # [OK] for all 11 sections no matter what actually happened.
+    #
+    # Each verdict also lands in a machine-readable $checks array, so a harness
+    # can compare these reads against the audit's own state getters - two
+    # independent readers of the same machine, which must agree.
+    function Add-Verdict {
+        param([string]$Id, $Ok, [string]$OkText, [string]$FailText)
+        if ($Ok) {
+            $logLines.Add("[OK] $OkText")
+        } else {
+            $suffix = if ($DryRun) { " (dry run: the write was intercepted)" } else { "" }
+            $logLines.Add("[FAIL] $FailText$suffix")
+        }
+        $entry = @{ id = $Id; ok = [bool]$Ok }
+        if ($DryRun -and -not $Ok) { $entry.blocked = $true }
+        $checks.Add($entry)
+    }
+
+    # 1. HAGS
+    $hagsVal = (Get-ItemProperty $gfxPath -Name "HwSchMode" -ErrorAction SilentlyContinue).HwSchMode
+    Add-Verdict -Id "hags" -Ok ($hagsVal -eq 2) -OkText "Hardware-Accelerated GPU Scheduling (HAGS) enabled (HwSchMode = 2)" -FailText "Hardware-Accelerated GPU Scheduling (HAGS) not enabled - HwSchMode still reads '$hagsVal'"
+
+    # 2. Windowed Game Optimizations (a missing value is Windows 11's default-on)
+    $autoOptVal = (Get-ItemProperty $dxPath -Name "AutoOptimizationsEnabled" -ErrorAction SilentlyContinue).AutoOptimizationsEnabled
+    Add-Verdict -Id "gameOpt" -Ok (($null -eq $autoOptVal) -or ($autoOptVal -eq 1)) -OkText "Windowed Game Auto Optimizations enabled (Lowest display lag)" -FailText "Windowed Game Auto Optimizations not enabled - AutoOptimizationsEnabled still reads '$autoOptVal'"
+
+    # 3. BCD timers and caps. One bcdedit read serves all three verdicts, with
+    # the same patterns the audit uses for the timers.
+    $bcd = (bcdedit /enum "{current}" 2>$null) | Out-String
+    Add-Verdict -Id "dynamicTick" -Ok ([bool]($bcd -match "disabledynamictick\s+Yes")) -OkText "Dynamic Tick Disabled (prevents clock drift & hitching)" -FailText "Dynamic Tick not disabled - 'disabledynamictick' does not read Yes in the BCD"
+    Add-Verdict -Id "platformTick" -Ok ([bool]($bcd -match "useplatformtick\s+Yes")) -OkText "Native Invariant TSC enforced via useplatformtick" -FailText "useplatformtick not set - it does not read Yes in the BCD"
+    Add-Verdict -Id "bcdCapsCleared" -Ok (-not ($bcd -match "\buseplatformclock\b" -or $bcd -match "\bnumproc\b" -or $bcd -match "\btruncatememory\b")) -OkText "BCD CPU core limitations & memory caps cleared" -FailText "BCD still carries useplatformclock / numproc / truncatememory"
+
+    # 4. Kernel RAM Pinning
+    $kramProps = Get-ItemProperty $mmPath -ErrorAction SilentlyContinue
+    Add-Verdict -Id "kernelRamLock" -Ok ($kramProps.DisablePagingExecutive -eq 1 -and $kramProps.LargeSystemCache -eq 0) -OkText "Windows Kernel & Drivers locked in physical RAM (Zero SSD paging hitches)" -FailText "Kernel RAM lock incomplete - DisablePagingExecutive reads '$($kramProps.DisablePagingExecutive)' (want 1), LargeSystemCache reads '$($kramProps.LargeSystemCache)' (want 0)"
+
+    # 5. GPU Interrupt Priority
+    if ($gpuDev) {
+        $prioVal = (Get-ItemProperty $gpuPrioKey -Name "DevicePriority" -ErrorAction SilentlyContinue).DevicePriority
+        Add-Verdict -Id "gpuInterruptPriority" -Ok ($prioVal -eq 1) -OkText "GPU ($($gpuDev.FriendlyName)) Interrupt Priority set to HIGH" -FailText "GPU ($($gpuDev.FriendlyName)) Interrupt Priority not applied - DevicePriority still reads '$prioVal'"
+    }
+
+    # 6. Power scheme & USB selective suspend
+    if ($prefScheme) {
+        $schemeNow = (& powercfg.exe /getactivescheme 2>$null) -join ""
+        Add-Verdict -Id "powerPlan" -Ok ($schemeNow -match [regex]::Escape($prefScheme.Guid)) -OkText "Activated power scheme: $($prefScheme.Name) (verified)" -FailText "Power scheme did not switch to $($prefScheme.Name)"
+        if ($prefScheme.Name -match "Hybr[ei]d") { $logLines.Add("[WARN] Hybred disables CPU idle states - faster, but higher idle heat and fan noise. Not for a laptop with poor cooling.") }
+    } else {
+        $logLines.Add("[SKIP] No Hybred / Ultimate / High performance scheme present")
+    }
+    $usbAc = Get-PowerSettingValue "2a737441-1930-4402-8d77-b2bebba308a3" "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
+    $usbDc = Get-PowerSettingValue "2a737441-1930-4402-8d77-b2bebba308a3" "48e6b7a6-50f5-4782-a5d4-53bb8f07e226" -Dc
+    Add-Verdict -Id "usbSuspend" -Ok ($usbAc -eq 0 -and $usbDc -eq 0) -OkText "USB Selective Suspend disabled (Zero input device wake-up latency)" -FailText "USB Selective Suspend still on - AC reads '$usbAc', DC reads '$usbDc' (want 0 on both)"
+
+    # 7. GameDVR
+    $gdvrVal = (Get-ItemProperty "HKCU:\System\GameConfigStore" -Name "GameDVR_Enabled" -ErrorAction SilentlyContinue).GameDVR_Enabled
+    $appCapVal = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" -Name "AppCaptureEnabled" -ErrorAction SilentlyContinue).AppCaptureEnabled
+    Add-Verdict -Id "gameDvr" -Ok ($gdvrVal -eq 0 -and $appCapVal -eq 0) -OkText "Background GameDVR & AppCapture disabled (Freed GPU/CPU overhead)" -FailText "GameDVR not fully disabled - GameDVR_Enabled reads '$gdvrVal' (want 0), AppCaptureEnabled reads '$appCapVal' (want 0)"
+
+    # 8. Game Mode (missing values are Windows' default-on)
+    $gbProps = Get-ItemProperty "HKCU:\SOFTWARE\Microsoft\GameBar" -ErrorAction SilentlyContinue
+    $gmAuto = if ($null -ne $gbProps -and $null -ne $gbProps.AutoGameModeEnabled) { $gbProps.AutoGameModeEnabled } else { $gbProps.AllowAutoGameMode }
+    Add-Verdict -Id "gameMode" -Ok (($null -eq $gmAuto) -or ($gmAuto -eq 1)) -OkText "Windows Game Mode enabled (prioritizes game threads)" -FailText "Game Mode not enabled - AllowAutoGameMode/AutoGameModeEnabled still read '$gmAuto'"
+
+    # 9. Shell responsiveness - three independent values, three verdicts
+    $tpVal = (Get-ItemProperty $tpPath -Name "EnableTransparency" -ErrorAction SilentlyContinue).EnableTransparency
+    Add-Verdict -Id "transparency" -Ok ($tpVal -eq 0) -OkText "Transparency effects off" -FailText "Transparency still on - EnableTransparency reads '$tpVal' (want 0)"
+    $msdVal = (Get-ItemProperty "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -ErrorAction SilentlyContinue).MenuShowDelay
+    Add-Verdict -Id "menuDelay" -Ok ($msdVal -eq "0") -OkText "Instant menus (MenuShowDelay = 0)" -FailText "Menu delay not removed - MenuShowDelay reads '$msdVal' (want 0)"
+    $mspdVal = (Get-ItemProperty "HKCU:\Control Panel\Mouse" -Name "MouseSpeed" -ErrorAction SilentlyContinue).MouseSpeed
+    Add-Verdict -Id "mousePrecision" -Ok ($mspdVal -eq "0") -OkText "Raw mouse input (no pointer acceleration)" -FailText "Pointer acceleration not disabled - MouseSpeed reads '$mspdVal' (want 0)"
+
+    # 10. Memory compression & CPU max frequency
+    $mmAgent = Get-MMAgent -ErrorAction SilentlyContinue
+    $mcVal = if ($null -ne $mmAgent) { $mmAgent.MemoryCompression } else { "unreadable" }
+    Add-Verdict -Id "memCompression" -Ok ($null -ne $mmAgent -and $mmAgent.MemoryCompression -eq $false) -OkText "Memory Compression disabled" -FailText "Memory Compression not disabled - MMAgent reads MemoryCompression = '$mcVal'"
+    $maxAc = Get-PowerSettingValue "SUB_PROCESSOR" "PROCTHROTTLEMAX"
+    $maxDc = Get-PowerSettingValue "SUB_PROCESSOR" "PROCTHROTTLEMAX" -Dc
+    Add-Verdict -Id "cpuMaxFreq" -Ok ($maxAc -eq 100 -and $maxDc -eq 100) -OkText "CPU max frequency left at 100% (min floor untouched)" -FailText "CPU max frequency not 100% - AC reads '$maxAc', DC reads '$maxDc' (want 100 on both)"
+
+    # 11. NVIDIA low-latency flag (only checked when the GPU is present)
+    if ($nv) {
+        $ridVal = (Get-ItemProperty $fts -Name "EnableRID61684" -ErrorAction SilentlyContinue).EnableRID61684
+        Add-Verdict -Id "nvidiaRid" -Ok ($ridVal -eq 1) -OkText "NVIDIA ultra-low-latency driver flag set (EnableRID61684)" -FailText "NVIDIA ultra-low-latency driver flag not applied - EnableRID61684 reads '$ridVal' (want 1)"
+    }
+
+    $failed = @($checks | Where-Object { -not $_.ok }).Count
+    $result = @{
+        success = ($failed -eq 0)
+        logs = @($logLines)
+        checks = @($checks)
+    }
+    if ($failed -gt 0) {
+        if ($DryRun) {
+            $result.blocked = $true
+            $result.error = "Dry run: $failed of $($checks.Count) section(s) were not applied - the writes were intercepted."
+        } else {
+            $result.error = "$failed of $($checks.Count) section(s) did not verify - see the log lines above."
+        }
+    }
+    return $result
 }
 
 function Optimize-Services {
@@ -3003,7 +3101,10 @@ while ($listener.IsListening) {
                     $sys = Apply-SystemTweaks
                     $srv = Optimize-Services
                     $allLogs = $net.logs + $sys.logs + $srv.logs
-                    $jsonOutput = @{ success = $true; logs = $allLogs; requiresReboot = $true }
+                    # success now reflects the sections that verified. /api/tweak/system
+                    # is the sub-apply with a read-back pass today; a bulk run that
+                    # could not verify must not toast as a success either way.
+                    $jsonOutput = @{ success = [bool]($net.success -and $sys.success -and $srv.success); logs = $allLogs; requiresReboot = $true }
                 }
                 "/api/services" {
                     $jsonOutput = Get-BloatServices

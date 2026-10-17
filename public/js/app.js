@@ -1749,15 +1749,21 @@ async function applySystemTweaks() {
     try {
         const res = await fetch(`${API_BASE}/api/tweak/system`, { method: "POST" });
         const data = await res.json();
-        if (data.success && data.logs) {
+        // Render the log first, whatever the verdict: the backend now reads every
+        // section back and tags each line with its own severity, which
+        // classifyLogLine already colors. The old code dropped the logs entirely
+        // when success was false, hiding exactly the lines that explain why.
+        if (data.logs) {
             data.logs.forEach(l => appendLog(l, "ok"));
+        }
+        if (data.success) {
             showToast("Kernel & Timers Tuned! (Restart recommended)", "success");
-            fetchSystemStatus();
         } else {
             const why = data.error || "backend reported no result";
             appendLog(`[ERR] System tweaks failed: ${why}`, "err");
             showToast(`System tweaks failed: ${why}`, "error");
         }
+        fetchSystemStatus();
     } catch (e) {
         appendLog(`[ERR] System tweaks failed: ${e.message}`, "err");
         showToast(`System tweaks failed: ${e.message}`, "error");

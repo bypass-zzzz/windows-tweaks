@@ -456,6 +456,61 @@ if ($SkipBulk) {
     }
 }
 
+# ── The bulk apply's own read-back, verified against independent readers ─────
+Section "system apply read-back (dry run)"
+if ($SkipBulk) {
+    Write-Host "  SKIPPED (-SkipBulk)" -ForegroundColor DarkGray
+} elseif (-not $guardProven) {
+    Assert-True "system apply read-back exercised" $false 'guard not proven live in this process - refusing to call it'
+} else {
+    # This is the regression pin for the "measured, not asserted" rule on the
+    # bulk apply. The old /api/tweak/system logged [OK] for all 11 sections
+    # unconditionally; the new one reads every value back and returns a
+    # machine-readable $checks array besides the human log. In a dry run the
+    # writes never reach the machine, so every verdict must describe the state
+    # the machine was already in - which /api/status reports independently.
+    $sysRes = Invoke-Api -Path '/api/tweak/system' -Body '{}' -TimeoutSec 180
+    $sysData = Parse-Json -Text $sysRes.text
+    Assert-True "/api/tweak/system answers 200 + JSON" ($sysRes.status -eq 200 -and $null -ne $sysData) "status=$($sysRes.status) body=$($sysRes.text.Substring(0, [Math]::Min(140, $sysRes.text.Length)))"
+    $sysChecks = @($sysData.checks)
+    $sysLogs = @($sysData.logs)
+    Write-Host ("  {0} section check(s), {1} log line(s)" -f $sysChecks.Count, $sysLogs.Count) -ForegroundColor DarkGray
+    Assert-True "every section reports a machine-readable check" ($sysChecks.Count -ge 15) "only $($sysChecks.Count) check(s)"
+
+    # Counts, not vibes: each check must be echoed by exactly one [OK]/[FAIL]
+    # line. WARN/SKIP lines (Hybred heat note, no power scheme) carry no verdict
+    # and are excluded from both sides of this equation.
+    $okLines = @($sysLogs | Where-Object { $_ -match '^\[OK\]' }).Count
+    $failLines = @($sysLogs | Where-Object { $_ -match '^\[FAIL\]' }).Count
+    Assert-True "each check is echoed by exactly one tagged verdict line" (($okLines + $failLines) -eq $sysChecks.Count) "ok=$okLines fail=$failLines checks=$($sysChecks.Count)"
+
+    # Dry-run invariant: a failed check must say the write was intercepted. If a
+    # section ever fails here WITHOUT blocked=true, the guard let a write through
+    # (or some unrelated failure) - both must be investigated, not papered over.
+    $unblockedFails = @($sysChecks | Where-Object { -not $_.ok -and -not $_.blocked }).Count
+    Assert-True "every failed check is marked blocked (dry run intercepted the write)" ($unblockedFails -eq 0) "$unblockedFails failed check(s) not marked blocked"
+
+    # Cross-read: a dry run cannot move the machine, so for the values the
+    # dashboard also reports, the bulk verdict and /api/status must agree about
+    # the same machine. This is the drift detector between the apply's read-back
+    # and the audit's state getters.
+    $statusNow = Parse-Json -Text (Invoke-Api -Path '/api/status').text
+    $crossMap = [ordered]@{
+        hags = 'hags'; gameOpt = 'gameOptimizations'; dynamicTick = 'dynamicTickDisabled';
+        platformTick = 'platformTick'; transparency = 'transparencyOff'; menuDelay = 'menuFast';
+        mousePrecision = 'precisionOff'; gameMode = 'gameMode'; memCompression = 'memDecompressed'
+    }
+    $mismatch = @()
+    foreach ($id in $crossMap.Keys) {
+        $chk = $sysChecks | Where-Object { $_.id -eq $id } | Select-Object -First 1
+        if ($null -eq $chk) { $mismatch += "$id (missing check)"; continue }
+        $dashValue = $statusNow.tweaks.($crossMap[$id])
+        if ($null -eq $dashValue) { continue }  # the dashboard itself reports unknown
+        if ([bool]$chk.ok -ne [bool]$dashValue) { $mismatch += "$id (check=$($chk.ok) dashboard=$dashValue)" }
+    }
+    Assert-True "bulk verdicts agree with the dashboard for the shared values" ($mismatch.Count -eq 0) ($mismatch -join ' ; ')
+}
+
 # ── Independent verification that nothing changed ────────────────────────────
 Section "nothing changed on the machine"
 
