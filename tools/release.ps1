@@ -7,13 +7,14 @@
 #   1. verifies the branch is main and the working tree is clean
 #   2. validates GH_TOKEN (prompting for it with hidden input if not set)
 #   3. pushes main so the release tag points at the right commit
-#   4. runs `npm run release` (electron-builder --win --x64 --publish always)
+#   4. creates and pushes the v<version> tag (must exist before publishing)
+#   5. runs `npm run release` (electron-builder --win --x64 --publish always)
 #
 # The publish config in package.json targets bypass-zzzz/windows-tweaks and
 # releaseType "release", so this creates a published release tagged
 # v<version> with the installer, blockmap and latest.yml attached. The
-# default release name is "v<version>" - rename it on GitHub if a custom
-# title is wanted.
+# default release name is "<version>" - rename it and add notes on GitHub if
+# a custom title is wanted (the publisher does not set a body).
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -52,6 +53,21 @@ try {
 git push origin main
 if ($LASTEXITCODE -ne 0) { throw 'git push failed. Aborting.' }
 
+# Ensure the release tag exists first. Creating a *published* GitHub release
+# for a missing tag fails with "Published releases must have a valid tag";
+# with the tag pushed first, the publisher attaches to it directly.
+$tag = "v$version"
+$existing = git rev-parse --verify --quiet "refs/tags/$tag"
+if (-not $existing) {
+    git tag $tag
+    Write-Host "Created tag $tag"
+}
+git push origin $tag
+if ($LASTEXITCODE -ne 0) { throw "Failed to push tag $tag. Aborting." }
+
+# Note: if a publish run dies after the release is created, just re-run - the
+# publisher appends missing assets to a recent published release (within 2
+# hours; EP_GH_IGNORE_TIME=1 lifts that window).
 npm run release
 if ($LASTEXITCODE -ne 0) { throw 'electron-builder publish failed.' }
 
