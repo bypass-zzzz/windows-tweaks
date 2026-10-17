@@ -1043,7 +1043,6 @@ const CLOUD_BACKED = {
     inputPersonalization: "typed words and clipboard history are sent to Microsoft",
     ipv6Tunnels:         "Teredo/ISATAP/6to4 relay IPv6 through public relays",
     nssiProbeOff:        "Windows polls a Microsoft endpoint to decide online status",
-    dohOff:              "DNS over HTTPS resolves names through a cloud resolver",
     // Deliberately NOT cloud-backed, mapped to null so the decision is visible
     // rather than an omission. These are the ones the old category-wide badge got
     // wrong, so they are the ones most likely to be "corrected" back by mistake:
@@ -1509,9 +1508,9 @@ const TARGET_MTU = 1500;
 const btnApplyGamingMtu = document.getElementById("btnApplyGamingMtu");
 if (btnApplyGamingMtu) btnApplyGamingMtu.addEventListener("click", () => applyMtu(TARGET_MTU));
 
-    // Network component bindings (keep IPv4 only / restore)
-    const btnBindIpv4 = document.getElementById("btnIpv4Only");
-    if (btnBindIpv4) btnBindIpv4.addEventListener("click", () => setBindings(true));
+    // Network component bindings (keep IPv4 + QoS / restore)
+    const btnBindCore = document.getElementById("btnKeepCore");
+    if (btnBindCore) btnBindCore.addEventListener("click", () => setBindings(true));
     const btnBindRestore = document.getElementById("btnRestoreBindings");
     if (btnBindRestore) btnBindRestore.addEventListener("click", () => setBindings(false));
     const btnBindRefresh = document.getElementById("btnRefreshBindings");
@@ -2172,7 +2171,8 @@ async function toggleStartupApp(name, scope, enabled) {
 // ---------------------------------------------------------------------------
 // NETWORK COMPONENT BINDINGS
 // Every component the active adapter is bound to, and whether it is enabled.
-// ipv4Only=true disables everything except ms_tcpip. false restores exactly what
+// coreOnly=true disables everything except the backend's keep list (ms_tcpip +
+// ms_pacer, i.e. IPv4 and the QoS Packet Scheduler). false restores exactly what
 // the disable path recorded, so this is not a guess at a "default" set.
 // ---------------------------------------------------------------------------
 async function loadBindings() {
@@ -2203,21 +2203,20 @@ async function loadBindings() {
     }
 }
 
-async function setBindings(ipv4Only) {
-    const host = document.getElementById("bindingsList");
-    const label = ipv4Only ? "Disabling every component except IPv4" : "Restoring components";
+async function setBindings(coreOnly) {
+    const label = coreOnly ? "Disabling every component except IPv4 and QoS" : "Restoring components";
     showToast(label + "...", "info");
     appendLog(`[NET-BIND] ${label}...`);
     try {
         const res = await fetch(`${API_BASE}/api/network/bindings`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ipv4Only })
+            body: JSON.stringify({ coreOnly })
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         (data.logs || []).forEach(l => appendLog(`[NET-BIND] ${l}`, "info"));
-        showToast(ipv4Only ? "IPv4-only mode applied" : "Components restored", "success");
+        showToast(coreOnly ? "IPv4 + QoS mode applied" : "Components restored", "success");
         await loadBindings();
     } catch (e) {
         appendLog(`[ERR] Network components failed: ${e.message}`, "err");

@@ -349,7 +349,7 @@
                         <button id="btnRefreshBindings" class="btn btn-secondary btn-sm">Refresh</button>
                     </div>
                     <p style="font-size:0.78rem; color:var(--text-secondary); margin-bottom:12px;">
-                        Everything your active adapter is bound to, and whether it is on. "Keep IPv4 Only" turns off every component except IPv4 on the adapters that are actually up.
+                        Everything your active adapter is bound to, and whether it is on. "Keep IPv4 and QoS" turns off every component except IPv4 and the QoS Packet Scheduler on the adapters that are actually up.
                     </p>
                     <div class="badge badge-warning" style="display:block; margin-bottom:14px; line-height:1.5;">
                         Disabling IPv6 breaks real software on modern Windows - Steam, some browsers, Windows Update and several VPN clients. Disabling Client for Microsoft Networks can break SMB and domain sign-in. Restore puts back exactly what was changed.
@@ -358,7 +358,7 @@
                         <span style="color:var(--text-muted);">Loading component list...</span>
                     </div>
                     <div style="display:flex; gap:10px;">
-                        <button id="btnIpv4Only" class="btn btn-primary btn-sm" style="flex:1;">Keep IPv4 Only</button>
+                        <button id="btnKeepCore" class="btn btn-primary btn-sm" style="flex:1;">Keep IPv4 and QoS</button>
                         <button id="btnRestoreBindings" class="btn btn-secondary btn-sm" style="flex:1;">Restore Components</button>
                     </div>
                 </div>

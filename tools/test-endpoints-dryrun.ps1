@@ -155,7 +155,7 @@ $dnsBefore = @((Get-DnsClientServerAddress -InterfaceAlias $adapter.Name -Addres
 $memBefore = (Get-MMAgent -ErrorAction SilentlyContinue).MemoryCompression
 # Adapter binding state, because /api/network/bindings with a body is the one
 # endpoint whose damage would be the least pleasant to notice (it disables every
-# binding that is not the keep-list component, including IPv6).
+# binding that is not in the keep list, including IPv6).
 $bindingsBefore = @{}
 foreach ($b in (Get-NetAdapterBinding -ErrorAction SilentlyContinue)) { $bindingsBefore["$($b.Name)|$($b.ComponentID)"] = [bool]$b.Enabled }
 $filesBefore = Get-DirSnapshot -Root $appDir
@@ -285,6 +285,12 @@ foreach ($r in $reads) {
 
 # Real values lifted from the reads, so the mutation calls below are idempotent.
 $catalog = @($readData['/api/tweak/catalog'])
+# The catalog is the UI's entire source of truth for the tweak tabs, so pin the
+# shape facts the retirement of "Disable DNS over HTTPS" depends on: ids stay
+# unique, and the retired id does not come back.
+$catalogIds = @($catalog | ForEach-Object { $_.id })
+Assert-True "catalog ids are unique" (@($catalogIds | Sort-Object -Unique).Count -eq $catalogIds.Count) "$(@($catalogIds | Sort-Object -Unique).Count) unique of $($catalogIds.Count)"
+Assert-True "catalog no longer offers dohOff (DNS over HTTPS)" (-not ($catalogIds -contains 'dohOff')) "dohOff still present in the catalog"
 $svcResp = $readData['/api/services']
 $services = @($(if ($svcResp.PSObject.Properties.Name -contains 'services') { $svcResp.services } else { $svcResp }))
 # /api/services returns a FLAT array of services - there is no 'groups' key. Each
@@ -418,11 +424,13 @@ if ($SkipBulk) {
     # These cannot be made idempotent: /api/tweak/all applies ~30 registry tweaks
     # plus power/BCD/service changes, /api/revert-defaults undoes them, and
     # /api/network/bindings with a body disables every adapter binding that is not
-    # the keep-list component. They are exercised only now, after the calls above
+    # in the keep list. They are exercised only now, after the calls above
     # have already proven this same process intercepts mutations. Every one of them
-    # is verified afterwards against real machine state.
+    # is verified afterwards against real machine state. One exception: the bindings
+    # endpoint can legitimately write nothing when the machine already matches its
+    # keep list, so its entry carries NoWriteOk (see the loop below).
     $proofGated = @(
-        @{ Path = '/api/network/bindings'; Body = '{"ipv4Only":true}'; Timeout = 180 }
+        @{ Path = '/api/network/bindings'; Body = '{"coreOnly":true}'; Timeout = 180; NoWriteOk = $true }
         @{ Path = '/api/services/optimize'; Body = '{}'; Timeout = 300 }
         @{ Path = '/api/tweak/network';    Body = '{}'; Timeout = 180 }
         @{ Path = '/api/tweak/system';     Body = '{}'; Timeout = 180 }
@@ -451,7 +459,14 @@ if ($SkipBulk) {
         $blockGrew = (Get-BlockCount) -gt $blkBefore
         $whatIfGrew = (Get-WhatIfCount) -gt $wiBefore
         $secs = [Math]::Round($sw.Elapsed.TotalSeconds, 1)
-        Assert-True ("bulk {0} -> 200 + JSON + intercepted" -f $m.Path) ($res.status -eq 200 -and $null -ne (Parse-Json -Text $res.text) -and ($blockGrew -or $whatIfGrew)) "status=$($res.status) blockLog=$blockGrew whatIf=$whatIfGrew elapsed=${secs}s body=$($res.text.Substring(0, [Math]::Min(140, $res.text.Length)))"
+        $intercepted = ($blockGrew -or $whatIfGrew)
+        # The bindings endpoint is the one bulk call that can legitimately write
+        # nothing: with IPv4 + QoS in the keep list, a machine already in that state
+        # has no binding left to disable, so no call ever reaches the guard. That is
+        # a pass, not a hole - but only when the response shows it merely inspected
+        # ([KEEP] / already disabled) and never claims a verified write.
+        $noWriteNeeded = ($m.ContainsKey('NoWriteOk') -and $m.NoWriteOk -and $res.text -match '\[KEEP\]|already disabled' -and $res.text -notmatch '\[OK\] (disabled|enabled) ')
+        Assert-True ("bulk {0} -> 200 + JSON + intercepted" -f $m.Path) ($res.status -eq 200 -and $null -ne (Parse-Json -Text $res.text) -and ($intercepted -or $noWriteNeeded)) "status=$($res.status) blockLog=$blockGrew whatIf=$whatIfGrew noWriteNeeded=$noWriteNeeded elapsed=${secs}s body=$($res.text.Substring(0, [Math]::Min(140, $res.text.Length)))"
         if ($res.status -eq 200) { Write-Host ("    took {0}s" -f $secs) -ForegroundColor DarkGray }
     }
 }

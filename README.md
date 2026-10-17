@@ -37,7 +37,7 @@ The dashboard. A hardware strip (CPU, GPU, NIC, OS) plus live metric tiles:
 
 - **MTU** - locks the active subinterface to the standard 1500. (A previous version forced 1280; see [Notable design decisions](#notable-design-decisions).)
 - **DNS benchmark and switcher** - measures Cloudflare / Google / Quad9 resolution latency side by side and applies the winner in one click.
-- **Network Components** - everything the active adapter is bound to, with "Keep IPv4 Only" (fenced with an honest warning that disabling IPv6 breaks Steam, parts of Windows Update and some VPNs) and a one-click **Restore** that puts back exactly what was changed. The IPv4 binding itself is never touched.
+- **Network Components** - everything the active adapter is bound to, with "Keep IPv4 and QoS" (fenced with an honest warning that disabling IPv6 breaks Steam, parts of Windows Update and some VPNs) and a one-click **Restore** that puts back exactly what was changed. IPv4 and the QoS Packet Scheduler binding are never touched.
 - **TCP/IP stack and NIC offloads** - Nagle's algorithm (`TCPNoDelay`), delayed ACKs (`TcpAckFrequency`), Windows network throttling, receive-side scaling, NIC checksum offload and Energy-Efficient Ethernet, QoS reserved bandwidth, and an ephemeral-port / TIME_WAIT expansion.
 - **Network and Ping settings** - the catalog's network group (LLMNR, WPAD auto-proxy, SMB1, Teredo/ISATAP/6to4 tunnels, TCP receive window, NCSI probes, and more).
 
@@ -93,7 +93,7 @@ A live console of engine activity - applies, verifications and reverts as they h
 
 ## The tweak engine
 
-As of v3.1.8 the registry catalog holds **93 entries**, defined as data rather than code: id, category, human label, description, registry path, ON value, OFF value, and optional modifiers. The UI renders the entire catalog from `/api/tweak/catalog`, and the same definition drives both the write path and the read-back, so the dashboard, the switch on screen and the machine cannot drift apart.
+As of v3.1.9 the registry catalog holds **92 entries**, defined as data rather than code: id, category, human label, description, registry path, ON value, OFF value, and optional modifiers. The UI renders the entire catalog from `/api/tweak/catalog`, and the same definition drives both the write path and the read-back, so the dashboard, the switch on screen and the machine cannot drift apart.
 
 Categories, with entry counts:
 
@@ -103,7 +103,7 @@ Categories, with entry counts:
 | System | 19 |
 | AI Features | 13 |
 | Privacy | 12 |
-| Network | 10 |
+| Network | 9 |
 | Gaming | 9 |
 | Updates | 7 |
 
@@ -212,7 +212,7 @@ Twelve palettes - Obsidian, Oxblood, Midnight, Amethyst, Copper, Forest, Prussia
 ## Notable design decisions
 
 - **MTU stays at 1500.** The app used to force 1280 on the belief that a smaller packet always means less latency; 1280 is the IPv6 minimum, not an optimization, and the runtime fragmentation probe that "decided" it was unreliable. 1500 is the standard Ethernet MTU and the fastest setting.
-- **"Keep IPv4 Only" is offered but fenced** with explicit warnings and a precise undo, because disabling IPv6 genuinely breaks real software (Steam, parts of Windows Update, some VPN clients).
+- **"Keep IPv4 and QoS" is offered but fenced** with explicit warnings and a precise undo, because disabling IPv6 genuinely breaks real software (Steam, parts of Windows Update, some VPN clients).
 - **The Hybrid Low Latency power plan keeps the CPU out of idle and boost ramp-down states by design** - excellent for frame pacing, at the cost of idle heat and fan noise. Laptops with poor cooling are told to skip it.
 - **Honest defaults.** Where Windows already enables something (Game Mode, windowed flip model, RSS), the switch says exactly that instead of pretending to add magic; OFF explicitly disables it.
 - **One writer per setting.** `SystemResponsiveness` has a single owner; service switches live only on the Services tab; static tweak definitions feed both the write path and the read-back.

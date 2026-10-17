@@ -1309,7 +1309,6 @@ $script:RegTweaks = @(
     @{ id="ipv6Tunnels"; category="Network"; label="Disable Teredo / ISATAP / 6to4"; desc="Stops the three Windows tunnel transition technologies from routing IPv6 traffic through public relays. Uses the real control DisabledComponents under Tcpip6 - an earlier version of this entry wrote to a key that does not exist, so it never took effect."; path="HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters"; values=@(@{name="DisabledComponents";type="DWord";on=14;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="AUDIT NOTE: this used to write 1. Per Microsoft's bitmask, 0x01 is the umbrella tunnel-interface bit, so it did cover all three - but it is broader than the label implies and also disables IP-TLS and CP interfaces, which breaks DirectAccess. 14 (0x0E) is the precise equivalent: 0x02 6to4 + 0x04 ISATAP + 0x08 Teredo, and nothing else. Also note ISATAP and Teredo are already disabled by default in Windows, so for those two this is a no-op; 6to4 is the only one enabled by default. Microsoft warns a value other than 0 or 32 can stop the Routing and Remote Access service working. Do NOT enable if you are on an IPv6-only or CGNAT connection, or behind a VPN that relies on a tunnel adapter - there is a real risk of losing external connectivity." },
     @{ id="ecnOff"; category="Network"; label="Disable ECN (Explicit Congestion Notification)"; desc="Stops the TCP stack advertising ECN, which adds an extra signalling round-trip when a path reports congestion. Turning it off removes that exchange, so a congested route recovers its send window sooner instead of waiting on markers in the data stream."; path="HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"; values=@(@{name="EnableECN";type="DWord";on=0;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="Genuine on long or congested paths, and it is the difference between a path that recovers in one RTT and one that limps along. Do NOT enable if your connection is genuinely congested and you want the gentler behaviour ECN gives the rest of the internet - disabling it makes your traffic more aggressive, not more polite. Little to no effect on a short clean LAN or a wired link with headroom."; advanced=$true },
     @{ id="tcpWindowSize"; category="Network"; label="Increase TCP Receive Window"; desc="Pins the TCP receive window to 256KB. AUDIT NOTE: read this before trusting the label. On Windows 11 the receive window is governed by Receive Window Auto-Tuning, and Microsoft's own SetTcpWindowSize documentation states this registry entry is not used in the current implementation. GlobalMaxTcpWindowSize, which this entry also used to write, is a legacy name that appears in no current Microsoft documentation and was historically misspelled in Windows itself so that it never took effect. This entry is kept because it does no harm, but expect no measurable change. The supported knob is: netsh int tcp set global autotuninglevel=experimental"; path="HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"; values=@(@{name="TcpWindowSize";type="DWord";on=262144;off="__REMOVE__"}); defaultOn=$false; reboot=$true; caution="Likely a no-op on Windows 11 because auto-tuning overrides it. If you want a real change, use the netsh autotuninglevel command instead of this toggle. It does not reduce ping either way - it would only affect throughput stalls on very long routes."; advanced=$true },
-    @{ id="dohOff"; category="Network"; label="Disable DNS over HTTPS"; desc="Stops Windows from silently routing name lookups through its own encrypted resolver. Without this, Windows can use DoH and bypass the DNS servers set in Network settings, which means the provider you chose is not always the one answering - and that adds variable lookup time. FIXED: the correct ADMX value name is DoHPolicy (not EnableDoH which does not exist in DNSClient). Value 1 = Prohibit DoH. Value 0 would enable it."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"; values=@(@{name="DoHPolicy";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Safe unless you specifically want DoH for privacy - some people enable it deliberately to stop their ISP seeing lookups. If you set DNS manually in Network settings, leave this on so those servers are the ones actually used. It is about consistency of which resolver answers, not about raw ping." },
     @{ id="nssiProbeOff"; category="Network"; label="Disable Connectivity Check Probes"; desc="Stops Windows periodically broadcasting to the internet to decide whether you are online. Those background probes show up as small periodic connections and can contend with a game on a latency-sensitive link."; path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator"; values=@(@{name="NoNetworkProbe";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Harmless to leave on. It does not improve ping - it just stops the OS checking. The visible effect is Windows sometimes showing the wrong network icon, because it can no longer tell online from offline reliably. Worth it on metered or very slow links, marginal everywhere else." },
     @{ id="autoDnsSuffixOff"; category="Network"; label="Disable DNS Suffix Search List"; desc="Stops Windows appending each connection's DNS suffix to every lookup that fails, which otherwise turns one failed name into several sequential timeouts before it gives up. Directly reduces tail latency on misspelled or blocked domains."; path="HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"; values=@(@{name="DisableSearchList";type="DWord";on=1;off="__REMOVE__"}); defaultOn=$false; reboot=$false; caution="Safe for a home or single-domain machine. Do NOT enable on a corporate network using a search suffix to find internal hosts by short name - unqualified lookups for printers, file shares and internal apps would stop resolving, which is a real breakage rather than a slowdown." },
     # --- Privacy ---
@@ -1563,9 +1562,11 @@ function Set-RegTweak($def, $on) {
 # APPLICATION OF TWEAKS
 # -----------------------------------------------------------------------------
 
-# The one binding we never touch. Disabling IPv4 is the one change here that
-# would remove network connectivity entirely, so it is excluded unconditionally.
-$script:KeepBinding = "ms_tcpip"
+# The bindings we never touch. Disabling IPv4 is the one change here that would
+# remove network connectivity entirely, and the QoS Packet Scheduler is kept so
+# the bulk disable cannot silently switch off traffic prioritisation as a side
+# effect of "turn off everything else".
+$script:KeepBindings = @("ms_tcpip", "ms_pacer")
 
 function Get-TargetAdapters {
     $a = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" -and $_.Virtual -ne $true })
@@ -1589,7 +1590,7 @@ function Get-NetworkBindingState {
 }
 
 function Set-NetworkComponents {
-    param([bool]$ipv4Only)
+    param([bool]$coreOnly)
 
     $log = @()
     $changed = @()
@@ -1598,11 +1599,11 @@ function Set-NetworkComponents {
         return @{ success = $false; error = "No network adapter found"; logs = @("[FAIL] No adapter available"); bindings = @() }
     }
 
-    if ($ipv4Only) {
+    if ($coreOnly) {
         foreach ($ad in $adapters) {
             $log += "Adapter: $($ad.Name)"
             foreach ($b in @(Get-NetAdapterBinding -Name $ad.Name -ErrorAction SilentlyContinue)) {
-                if ($b.ComponentID -eq $script:KeepBinding) {
+                if ($script:KeepBindings -contains $b.ComponentID) {
                     $log += "  [KEEP] $($b.DisplayName)"
                     continue
                 }
@@ -1658,12 +1659,14 @@ function Set-NetworkComponents {
 
     $after = @(Get-NetworkBindingState)
     $enabledNow = @($after | Where-Object { $_.enabled })
-    if ($ipv4Only) {
-        $bad = @($enabledNow | Where-Object { $_.component -ne $script:KeepBinding })
-        if ($bad.Count -eq 0 -and $enabledNow.Count -ge 1) {
-            $log += "[OK] Exactly $($enabledNow.Count) binding enabled and it is IPv4 (verified)"
+    if ($coreOnly) {
+        # Read back rather than assert: name every component still on that is not
+        # in the keep list, so a disable that silently failed is visible.
+        $stray = @($enabledNow | Where-Object { $script:KeepBindings -notcontains $_.component })
+        if ($stray.Count -eq 0 -and $enabledNow.Count -ge 1) {
+            $log += "[OK] Only the keep list is still enabled (verified): $(($enabledNow | ForEach-Object { $_.display }) -join ', ')"
         } else {
-            $log += "[FAIL] still enabled: $(($bad | ForEach-Object { $_.display }) -join ', ')"
+            $log += "[FAIL] still enabled outside the keep list: $(($stray | ForEach-Object { $_.display }) -join ', ')"
         }
     }
 
@@ -3083,9 +3086,9 @@ while ($listener.IsListening) {
                 "/api/network/bindings" {
                     if ($body) {
                         $p = $body | ConvertFrom-Json -ErrorAction SilentlyContinue
-                        $ipv4Only = $true
-                        if ($null -ne $p.ipv4Only) { $ipv4Only = [bool]$p.ipv4Only }
-                        $jsonOutput = Set-NetworkComponents -ipv4Only $ipv4Only
+                        $coreOnly = $true
+                        if ($null -ne $p.coreOnly) { $coreOnly = [bool]$p.coreOnly }
+                        $jsonOutput = Set-NetworkComponents -coreOnly $coreOnly
                     } else {
                         $jsonOutput = @{ success = $true; bindings = @(Get-NetworkBindingState) }
                     }
