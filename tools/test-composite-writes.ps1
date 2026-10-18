@@ -117,6 +117,53 @@ Assert-True 'Set-RegTweak routed the off path too' ((Get-Raw) -match 'SwapEffect
 Reset-Scratch
 Assert-True 'the scratch tree was cleaned up' (-not (Test-Path $treeRoot))
 
+# ── The real catalogue entries that use this writer ──────────────────────────
+# Two cards share ONE payload value. This reads them straight out of server.ps1
+# (so it fails if the catalog is edited apart from the writer) and then proves a
+# dry-run apply cannot move the machine's real DirectX payload by one byte.
+function Get-CatalogEntry([string]$id) {
+    $t2 = $null; $e2 = $null
+    $a2 = [System.Management.Automation.Language.Parser]::ParseFile($server, [ref]$t2, [ref]$e2)
+    foreach ($h in $a2.FindAll({ param($n) $n -is [System.Management.Automation.Language.HashtableAst] }, $true)) {
+        $p = @{}
+        foreach ($kv in $h.KeyValuePairs) { $p["$($kv.Item1.Extent.Text)".Trim("'", '"')] = $kv.Item2 }
+        if (-not $p.ContainsKey('id')) { continue }
+        if ("$($p['id'].Extent.Text)".Trim("'", '"') -ne $id) { continue }
+        $out = @{}
+        foreach ($k in $p.Keys) { $out[$k] = "$($p[$k].Extent.Text)".Trim("'", '"') }
+        return $out
+    }
+    return $null
+}
+
+Write-Host ''
+Write-Host '--- the real DirectX cards ---'
+$d1 = Get-CatalogEntry 'dxWindowedGames'
+$d2 = Get-CatalogEntry 'dxAutoHdr'
+Assert-True 'dxWindowedGames is in the catalog' ($null -ne $d1)
+Assert-True 'dxAutoHdr is in the catalog' ($null -ne $d2)
+Assert-True 'the windowed-games card edits SwapEffectUpgradeEnable (1 on / 0 off)' ($d1.mergeKey -eq 'SwapEffectUpgradeEnable' -and $d1.mergeOn -eq '1' -and $d1.mergeOff -eq '0')
+Assert-True 'the Auto HDR card edits AutoHDREnable (1 on / 0 off)' ($d2.mergeKey -eq 'AutoHDREnable' -and $d2.mergeOn -eq '1' -and $d2.mergeOff -eq '0')
+Assert-True 'both cards are typed merge' ($d1.type -eq 'merge' -and $d2.type -eq 'merge')
+Assert-True 'both cards share ONE payload value and own different pairs' ($d1.path -eq $d2.path -and $d1.valueName -eq $d2.valueName -and $d1.mergeKey -ne $d2.mergeKey)
+Assert-True 'windowed games defaults ON, Auto HDR defaults OFF' ($d1.defaultOn -eq '$true' -and $d2.defaultOn -eq '$false')
+
+$realPath = $d1.path
+$realName = $d1.valueName
+function Get-RealPayload { if (Test-Path $realPath) { [string](Get-ItemProperty -Path $realPath -Name $realName -ErrorAction SilentlyContinue).$realName } else { $null } }
+$realBefore = Get-RealPayload
+$WhatIfPreference = $true
+try {
+    # *>&1 | Out-Null swallows the "What if:" lines the guard prints while still
+    # exercising the real writer, so this check is about the machine, not the log.
+    & {
+        Set-RegTweak -def @{ id = $d1.id; path = $d1.path; type = 'merge'; valueName = $d1.valueName; mergeKey = $d1.mergeKey; mergeOn = $d1.mergeOn; mergeOff = $d1.mergeOff; defaultOn = $true } -on $true | Out-Null
+        Set-RegTweak -def @{ id = $d2.id; path = $d2.path; type = 'merge'; valueName = $d2.valueName; mergeKey = $d2.mergeKey; mergeOn = $d2.mergeOn; mergeOff = $d2.mergeOff; defaultOn = $false } -on $true | Out-Null
+    } *>&1 | Out-Null
+} finally { $WhatIfPreference = $false }
+$realAfter = Get-RealPayload
+Assert-True 'a dry-run apply through Set-RegTweak left the real DirectX payload untouched' ($realBefore -eq $realAfter)
+
 Write-Host ''
 Write-Host '=== RESULT ==='
 Write-Host ("  passed: {0}" -f $script:Passed)
