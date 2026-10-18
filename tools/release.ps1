@@ -11,6 +11,14 @@
 #   5. creates and pushes the v<version> tag (must exist before publishing)
 #   6. runs `npm run release` (electron-builder --win --x64 --publish always)
 #
+# If step 6 dies after the release object was created - the two parallel publish
+# managers (nsis + portable) race on create-release and one gets
+# "422 tag_name already_exists" - the release can be left with missing assets and
+# an unwritten latest.yml. Finish it deterministically with:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File tools\finish-release.ps1
+# which uploads the missing pieces, regenerates latest.yml, attaches the notes
+# and verifies everything. Do not try to "fix" it with a second `npm run release`.
+#
 # The publish config in package.json targets bypass-zzzz/windows-tweaks and
 # releaseType "release", so this creates a published release tagged
 # v<version> with the installer, blockmap and latest.yml attached. The
@@ -83,7 +91,9 @@ if ($LASTEXITCODE -ne 0) { throw "Failed to push tag $tag. Aborting." }
 # publisher appends missing assets to a recent published release (within 2
 # hours; EP_GH_IGNORE_TIME=1 lifts that window).
 npm run release
-if ($LASTEXITCODE -ne 0) { throw 'electron-builder publish failed.' }
+if ($LASTEXITCODE -ne 0) {
+    throw 'electron-builder publish failed. If the release object already exists, run tools\finish-release.ps1 to complete it (it uploads the missing assets, rewrites latest.yml and attaches the notes).'
+}
 
 Write-Host ''
 Write-Host "Done. Release: https://github.com/bypass-zzzz/windows-tweaks/releases/tag/v$version"
