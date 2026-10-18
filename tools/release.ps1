@@ -5,10 +5,11 @@
 #
 # What it does:
 #   1. verifies the branch is main and the working tree is clean
-#   2. validates GH_TOKEN (prompting for it with hidden input if not set)
-#   3. pushes main so the release tag points at the right commit
-#   4. creates and pushes the v<version> tag (must exist before publishing)
-#   5. runs `npm run release` (electron-builder --win --x64 --publish always)
+#   2. runs the pre-flight gates (main-process resilience + release-feed guard)
+#   3. validates GH_TOKEN (prompting for it with hidden input if not set)
+#   4. pushes main so the release tag points at the right commit
+#   5. creates and pushes the v<version> tag (must exist before publishing)
+#   6. runs `npm run release` (electron-builder --win --x64 --publish always)
 #
 # The publish config in package.json targets bypass-zzzz/windows-tweaks and
 # releaseType "release", so this creates a published release tagged
@@ -33,6 +34,19 @@ if ($dirty) {
     $dirty | ForEach-Object { Write-Host "  $_" }
     throw 'Commit or stash the changes first. Aborting.'
 }
+
+# ── Pre-flight gates (fast, hermetic) ────────────────────────────────────────
+# The update feed must stay public and token-free, and the main process must
+# survive its resilience suite; both have caught real regressions already. Do
+# not bypass: a bad feed here is the outage that stranded pre-3.1.5 installs.
+Write-Host ''
+Write-Host 'Running pre-flight gates...'
+& node (Join-Path $root 'tools\test-main-resilience.js')
+if ($LASTEXITCODE -ne 0) { throw 'test-main-resilience.js failed. Aborting.' }
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'tools\test-release-feed.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'test-release-feed.ps1 failed. Aborting.' }
+Write-Host 'Pre-flight gates passed.'
+Write-Host ''
 
 if (-not $env:GH_TOKEN) {
     $secure = Read-Host -Prompt 'GitHub token (GH_TOKEN, input hidden)' -AsSecureString
