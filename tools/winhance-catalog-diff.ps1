@@ -108,6 +108,7 @@ foreach ($t in $hashtables) {
         path      = [string](Get-NodeLiteral $map['path'])
         valueName = if ($map.ContainsKey('valueName')) { [string](Get-NodeLiteral $map['valueName']) } else { '' }
         type      = [string](Get-NodeLiteral $map['type'])
+        mergeKey  = if ($map.ContainsKey('mergeKey')) { [string](Get-NodeLiteral $map['mergeKey']) } else { '' }
         values    = @()
     }
     # Multi-write entries carry values=@(@{name=..;..},..) and no top-level valueName.
@@ -124,12 +125,27 @@ if ($ourEntries.Count -eq 0) { throw 'no catalog entries were extracted from ser
 # Build the ownership index. A pair owned by more than one entry is a real bug
 # (the same registry value written from two places).
 $ourPairs = @{}
+# A merge entry ("type=merge") does not own a whole registry value: it owns ONE
+# pair inside a shared key=value payload string. Three Winhance cards live in the
+# same DirectXUserGlobalSettings string on three different pairs (windowed games,
+# VRR optimizations, Auto HDR), so the pair name has to be part of the ownership
+# key or they all look like owners of a single value.
+$ourMergeOwners = @{}
 foreach ($e in $ourEntries) {
     $pairNames = @()
     if ($e.valueName) { $pairNames += $e.valueName }
     $pairNames += $e.values
+    $normPath = ConvertTo-NormPath $e.path
     foreach ($vn in ($pairNames | Where-Object { $_ })) {
-        $k = "{0}|{1}" -f (ConvertTo-NormPath $e.path), (ConvertTo-NormValue $vn)
+        $normValue = ConvertTo-NormValue $vn
+        $plain = "{0}|{1}" -f $normPath, $normValue
+        if (($e.type -eq 'merge') -and $e.mergeKey) {
+            $k = "{0}#{1}" -f $plain, (ConvertTo-NormValue $e.mergeKey)
+            if (-not $ourMergeOwners.ContainsKey($plain)) { $ourMergeOwners[$plain] = New-Object System.Collections.Generic.List[string] }
+            if (-not $ourMergeOwners[$plain].Contains($e.id)) { $ourMergeOwners[$plain].Add($e.id) }
+        } else {
+            $k = $plain
+        }
         if (-not $ourPairs.ContainsKey($k)) { $ourPairs[$k] = New-Object System.Collections.Generic.List[string] }
         $ourPairs[$k].Add($e.id)
     }
@@ -186,6 +202,13 @@ foreach ($s in $settings) {
         if ($ourPairs.ContainsKey($w.pair)) {
             $exactPairs++
             foreach ($o in $ourPairs[$w.pair]) { if (-not $owners.Contains($o)) { $owners.Add($o) } }
+        }
+        elseif ($ourMergeOwners.ContainsKey($w.pair)) {
+            # We manage a pair inside this payload value. Which pair can only be
+            # matched by hand (the catalogue does not say), so this counts as
+            # covered and the owner list names the merge entries.
+            $exactPairs++
+            foreach ($o in $ourMergeOwners[$w.pair]) { if (-not $owners.Contains($o)) { $owners.Add($o) } }
         }
         elseif ($ourPaths.ContainsKey($w.key)) {
             foreach ($o in $ourPaths[$w.key]) { if (-not $pathOnlyOwners.Contains($o)) { $pathOnlyOwners.Add($o) } }
