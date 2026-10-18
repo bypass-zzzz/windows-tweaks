@@ -6,7 +6,9 @@ Windows Tweaks is a desktop app that applies real, measurable performance and de
 
 It is deliberately **not** a "one-click optimizer". Every switch is driven by what the machine actually reports: the app reads live state first, writes only when asked, and then reads the value back to prove the write landed. Any tweak that trades something away - battery life, security, stability - says so on its face, and says who should not enable it.
 
-Current release: **v3.1.9 (KERNEL EDITION)**, published to GitHub Releases with in-app auto-update (`electron-updater` + `latest.yml`).
+Current release: **v3.1.10 (KERNEL EDITION)**, published to GitHub Releases with in-app auto-update (`electron-updater` + `latest.yml`).
+
+**Stuck on an old version?** Builds before v3.1.5 checked a private update feed that has since been retired, so they can never see or fetch newer releases on their own. If no update has arrived in a while, install the [latest release](https://github.com/bypass-zzzz/windows-tweaks/releases/latest) once - that re-points the app at the public feed, and every update after that arrives automatically.
 
 ## Contents
 
