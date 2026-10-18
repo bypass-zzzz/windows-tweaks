@@ -1501,6 +1501,16 @@ function Get-TweakTargetValue($v) {
     }
     return $v.on
 }
+# A value definition may override the entry's path. Several real settings write
+# the same logical switch to more than one hive - Background App Permissions and
+# Storage Sense write HKCU and HKLM, GameDVR writes HKCU\System\GameConfigStore
+# plus an HKLM policy, and VBS/HVCI write several values under DeviceGuard - and
+# all of them belong on ONE card. A value therefore carries its own optional
+# `path` and falls back to the entry's path when it does not.
+function Get-ValuePath($def, $v) {
+    if ($v.path) { return $v.path }
+    return $def.path
+}
 # Enum tweaks (a dropdown rather than a toggle) read a single named value.
 # Returns $null when the value has never been written, which the UI renders as
 # the Windows-default option rather than as 0 - 0 is a real choice here, so the
@@ -1596,7 +1606,8 @@ function Get-RegTweakState($def) {
         return $false
     }
     foreach ($v in @($def['values'])) {
-        $cur = (Get-ItemProperty -Path $def.path -Name $v.name -ErrorAction SilentlyContinue).($v.name)
+        $vPath = Get-ValuePath $def $v
+        $cur = (Get-ItemProperty -Path $vPath -Name $v.name -ErrorAction SilentlyContinue).($v.name)
         if ($null -eq $cur) {
             if (-not [bool]$def.defaultOn) { return $false }
         } elseif ("$cur" -ne "$(Get-TweakTargetValue $v)") {
@@ -1622,12 +1633,16 @@ function Set-RegTweak($def, $on) {
     $valueDefs = $def['values']
     if ($null -eq $valueDefs) { return }
     foreach ($v in @($valueDefs)) {
+        $vPath = Get-ValuePath $def $v
+        if ($on -and -not (Test-Path $vPath)) {
+            New-Item -Path $vPath -Force -ErrorAction SilentlyContinue | Out-Null
+        }
         if ($on) {
-            Set-ItemProperty -Path $def.path -Name $v.name -Value (Get-TweakTargetValue $v) -Type $v.type -Force -ErrorAction SilentlyContinue | Out-Null
+            Set-ItemProperty -Path $vPath -Name $v.name -Value (Get-TweakTargetValue $v) -Type $v.type -Force -ErrorAction SilentlyContinue | Out-Null
         } elseif ($v.off -eq "__REMOVE__") {
-            Remove-ItemProperty -Path $def.path -Name $v.name -ErrorAction SilentlyContinue
+            Remove-ItemProperty -Path $vPath -Name $v.name -ErrorAction SilentlyContinue
         } else {
-            Set-ItemProperty -Path $def.path -Name $v.name -Value $v.off -Type $v.type -Force -ErrorAction SilentlyContinue | Out-Null
+            Set-ItemProperty -Path $vPath -Name $v.name -Value $v.off -Type $v.type -Force -ErrorAction SilentlyContinue | Out-Null
         }
     }
 }

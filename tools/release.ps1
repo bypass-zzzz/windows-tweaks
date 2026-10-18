@@ -51,6 +51,8 @@ Write-Host ''
 Write-Host 'Running pre-flight gates...'
 & node (Join-Path $root 'tools\test-main-resilience.js')
 if ($LASTEXITCODE -ne 0) { throw 'test-main-resilience.js failed. Aborting.' }
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'tools\test-multipath-writes.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'test-multipath-writes.ps1 failed. Aborting.' }
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'tools\test-release-feed.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'test-release-feed.ps1 failed. Aborting.' }
 Write-Host 'Pre-flight gates passed.'
