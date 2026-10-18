@@ -454,6 +454,29 @@ function updaterNotify(status, message) {
 
 let autoUpdateInitialized = false;
 
+// The public download page, named whenever a check dies for good. The release
+// feed itself is public and token-free (tools/test-release-feed.ps1 enforces
+// that), so a failure is a transient network/config problem - either way the
+// releases page always carries the newest installer.
+const UPDATE_MANUAL_URL = 'https://github.com/bypass-zzzz/windows-tweaks/releases/latest';
+
+// Terminal-failure wording. The hint is added only where a failure is truly
+// final (the auto check exhausted its retries, or the user pressed the button
+// themselves); retry-phase errors stay plain so a blip a retry may fix does
+// not spam the manual-download advice.
+function withManualUpdateHint(message) {
+    const text = String(message || 'Update failed.');
+    return text.includes(UPDATE_MANUAL_URL) ? text : `${text} If this keeps failing, download the latest release manually: ${UPDATE_MANUAL_URL}`;
+}
+
+// A failed check reaches the renderer twice in the real app (the promise
+// rejection and the 'error' event); both routes come through here so the hint
+// logic lives in exactly one place.
+function notifyUpdateFailure(e) {
+    const raw = (e && e.message) || 'Update check failed.';
+    updaterNotify('error', updateStage === 'check-manual' ? withManualUpdateHint(raw) : raw);
+}
+
 // Automatic checks used to be strictly one-shot: updateCheckedOnce was set
 // before the call, so a single network blip at launch meant no update
 // notification for the rest of the session. A failed *check* now retries twice
@@ -475,7 +498,7 @@ function scheduleUpdateRetry() {
     // check and pull the payload again, which is not what a retry should mean.
     if (updateStage !== 'check') return;
     if (updateRetryIndex >= UPDATE_RETRY_DELAYS_MS.length) {
-        updaterNotify('idle', 'Update check could not reach GitHub. Use "Check for updates" to try again.');
+        updaterNotify('idle', withManualUpdateHint('Update check could not reach GitHub. Use "Check for updates" to try again.'));
         return;
     }
     const delay = UPDATE_RETRY_DELAYS_MS[updateRetryIndex];
@@ -507,10 +530,10 @@ function runUpdateCheck(manual) {
     updateStage = manual ? 'check-manual' : 'check';
     try {
         const p = updater.checkForUpdates();
-        if (p && p.catch) p.catch((e) => { updateBusy = false; updaterNotify('error', (e && e.message) || 'Update check failed.'); scheduleUpdateRetry(); });
+        if (p && p.catch) p.catch((e) => { updateBusy = false; notifyUpdateFailure(e); scheduleUpdateRetry(); });
     } catch (e) {
         updateBusy = false;
-        updaterNotify('error', (e && e.message) || 'Update check failed.');
+        notifyUpdateFailure(e);
         scheduleUpdateRetry();
     }
 }
@@ -526,11 +549,13 @@ function checkForUpdates(manual) {
     runUpdateCheck(manual);
 }
 
-// Private release repo access is configured via the publish.token field in
-// package.json (baked into app-update.yml). electron-updater selects its
-// PrivateGitHubProvider from that — requestHeaders alone are not enough.
-// WARNING: anyone holding the .exe can extract this token. Keep it scoped
-// to the windows-tweaks repo only.
+// The release feed is PUBLIC: package.json pins publish.private=false and the
+// app-update.yml baked into the installer carries no token, so electron-updater
+// needs no credential to read it. Never reintroduce publish.token/private=true:
+// the old private feed's token was revoked, and every update check on those
+// builds hard-failed with 401 forever - the "updates never arrive" outage.
+// tools/test-release-feed.ps1 fails the release if either field comes back, and
+// release.ps1 runs it as a pre-flight gate.
 function initAutoUpdate() {
     if (autoUpdateInitialized) return;
     autoUpdateInitialized = true;
@@ -562,7 +587,7 @@ function initAutoUpdate() {
     });
     updater.on('error', (e) => {
         updateBusy = false;
-        updaterNotify('error', (e && e.message) || 'Updater error.');
+        notifyUpdateFailure(e);
         // The promise rejection and this event both fire for a failed check;
         // scheduling is idempotent while a retry is pending.
         scheduleUpdateRetry();

@@ -21,6 +21,8 @@ const cp = require('child_process');
 
 const REPO = path.resolve(__dirname, '..');
 const MAIN = path.join(REPO, 'main.js');
+// The manual-download fallback the updater must name when a check dies for good.
+const RELEASES_URL = 'https://github.com/bypass-zzzz/windows-tweaks/releases/latest';
 const realLog = console.log.bind(console);
 const realImmediate = setImmediate;
 // Several real ticks: main.js chains callbacks (exec → Promise.all → spawn →
@@ -370,6 +372,15 @@ async function main() {
     const terminal = b.channelOf('updater-status').filter(s => s.status === 'idle');
     Check('the dead end is stated, with the way out',
         terminal.length === 1 && /Check for updates/.test(terminal[0].message), JSON.stringify(terminal));
+    Check('the dead end names the manual download page',
+        terminal.length === 1 && terminal[0].message.includes(RELEASES_URL),
+        terminal[0] && terminal[0].message);
+    // Retry-phase errors stay plain: the hint belongs to terminal failures, and
+    // a transient blip that a retry may still fix should not push it.
+    const retryErrors = b.channelOf('updater-status').filter(s => s.status === 'error');
+    Check('retry-phase errors stay plain (no hint spam)',
+        retryErrors.length === 3 && retryErrors.every(s => !s.message.includes('releases/latest')),
+        JSON.stringify(retryErrors.map(s => s.message)));
     b.clock.advance(300000);
     await flush();
     Check('nothing further is scheduled after giving up', b.updateCalls === 3, 'calls=' + b.updateCalls);
@@ -393,6 +404,18 @@ async function main() {
     Check('a failed MANUAL check does not schedule its own retry',
         b.channelOf('updater-status').filter(s => s.status === 'retry').length === 1,
         String(b.channelOf('updater-status').filter(s => s.status === 'retry').length));
+    const manualErrors = b.channelOf('updater-status').filter(s => s.status === 'error');
+    Check('a failed manual check names the manual download page',
+        manualErrors.some(s => s.message.includes(RELEASES_URL)),
+        JSON.stringify(manualErrors.map(s => s.message)));
+    // In the real app the updater's 'error' event fires alongside the rejected
+    // promise; it must carry the same hint for a manual check.
+    b.updater.emit('error', new Error('simulated offline'));
+    await flush();
+    const eventErrors = b.channelOf('updater-status').filter(s => s.status === 'error');
+    Check('the updater error event carries the same hint for manual checks',
+        eventErrors.filter(s => s.message.includes(RELEASES_URL)).length === 2,
+        JSON.stringify(eventErrors.map(s => s.message)));
 
     // ── 7. A failed download is not retried as if it were a failed check ────
     Section('auto-update: a download failure is not re-checked');
