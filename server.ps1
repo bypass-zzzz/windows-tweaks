@@ -1511,6 +1511,86 @@ function Get-ValuePath($def, $v) {
     if ($v.path) { return $v.path }
     return $def.path
 }
+# Some switches are not a registry value in their own right but ONE pair inside a
+# key=value payload string. "Optimizations for windowed games" is
+# SwapEffectUpgradeEnable inside
+# HKCU\Software\Microsoft\DirectX\UserGpuPreferences\DirectXUserGlobalSettings,
+# which is shaped like "SwapEffectUpgradeEnable=0;VRROptimizeEnable=0;". Writing
+# the whole string would wipe every neighbouring pair (VRROptimizeEnable is
+# Windows' own VRR toggle), so a merge entry reads the payload, edits the one
+# pair, and writes it back with everything else - and its order - untouched.
+#
+# Split-MergeString is deliberately lossless: it keeps bare tokens that carry no
+# '=' and keeps the value verbatim after the first '=', so a payload this app did
+# not write survives a round trip unchanged.
+function Split-MergeString([string]$s) {
+    $pairs = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $s) { return $pairs }
+    foreach ($chunk in ($s -split ';')) {
+        $t = "$chunk".Trim()
+        if ($t.Length -eq 0) { continue }
+        $i = $t.IndexOf('=')
+        if ($i -lt 0) {
+            $pairs.Add([pscustomobject]@{ key = $t; value = $null })
+        } else {
+            $pairs.Add([pscustomobject]@{ key = $t.Substring(0, $i).Trim(); value = $t.Substring($i + 1).Trim() })
+        }
+    }
+    # `,` stops PowerShell unrolling the list on return. Without it an empty
+    # payload - the normal first-run case - returns $null and the caller's
+    # .Add() then dies with "cannot call a method on a null-valued expression".
+    return ,$pairs
+}
+
+# Serialises the pairs back to the payload form Windows uses: "k=v;" with a
+# trailing separator. Order is whatever Split-MergeString produced, so the
+# untouched pairs keep their original positions.
+function Join-MergeString($pairs) {
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($p in $pairs) {
+        if ($null -eq $p.value) { [void]$sb.Append("$($p.key)") }
+        else { [void]$sb.Append("$($p.key)=$($p.value)") }
+        [void]$sb.Append(';')
+    }
+    return $sb.ToString()
+}
+
+# The value of the managed pair, or $null when the value or the pair has never
+# been written - which the state reader treats as "Windows default".
+function Get-MergeStringValue($def) {
+    if (-not $def.valueName) { return $null }
+    $cur = (Get-ItemProperty -Path $def.path -Name $def.valueName -ErrorAction SilentlyContinue).($def.valueName)
+    if ($null -eq $cur) { return $null }
+    foreach ($p in (Split-MergeString ([string]$cur))) {
+        if ($p.key -ieq $def.mergeKey) {
+            if ($null -eq $p.value) { return $null }
+            return [string]$p.value
+        }
+    }
+    return $null
+}
+
+function Set-MergeStringValue($def, $on) {
+    $target = if ($on) { "$($def.mergeOn)" } else { "$($def.mergeOff)" }
+    $cur = ''
+    if (Test-Path $def.path) {
+        $cur = [string](Get-ItemProperty -Path $def.path -Name $def.valueName -ErrorAction SilentlyContinue).($def.valueName)
+    }
+    $pairs = Split-MergeString $cur
+    $hit = $false
+    foreach ($p in $pairs) {
+        if ($p.key -ieq $def.mergeKey) { $p.value = $target; $hit = $true }
+    }
+    if (-not $hit) {
+        $pairs.Add([pscustomobject]@{ key = $def.mergeKey; value = $target })
+    }
+    $out = Join-MergeString $pairs
+    if (-not (Test-Path $def.path)) {
+        New-Item -Path $def.path -Force -ErrorAction SilentlyContinue | Out-Null
+    }
+    Set-ItemProperty -Path $def.path -Name $def.valueName -Value $out -Type String -Force -ErrorAction SilentlyContinue | Out-Null
+    return $out
+}
 # Enum tweaks (a dropdown rather than a toggle) read a single named value.
 # Returns $null when the value has never been written, which the UI renders as
 # the Windows-default option rather than as 0 - 0 is a real choice here, so the
@@ -1589,6 +1669,11 @@ function Get-RegTweakState($def) {
     # nameless item looked up an empty value name, came back $null, found an empty
     # $def.defaultOn below, and returned $false. Every dropdown therefore reported
     # "not applied" forever, whatever the registry actually said.
+    if ($def.type -eq 'merge') {
+        $cur = Get-MergeStringValue -def $def
+        if ($null -eq $cur) { return [bool]$def.defaultOn }
+        return ("$cur" -eq "$($def.mergeOn)")
+    }
     if ($def.type -eq 'enum') {
         $cur = Get-RegTweakValue -def $def
         if ($null -eq $cur) { return $false }
@@ -1619,6 +1704,12 @@ function Get-RegTweakState($def) {
 
 function Set-RegTweak($def, $on) {
     $on = [bool]$on
+    # Payload-string entries edit one pair in place; the rest of the string is
+    # not ours to touch.
+    if ($def.type -eq 'merge') {
+        Set-MergeStringValue -def $def -on $on | Out-Null
+        return
+    }
     if ($on -and -not (Test-Path $def.path)) {
         New-Item -Path $def.path -Force -ErrorAction SilentlyContinue | Out-Null
     }
@@ -2636,6 +2727,13 @@ function Restore-Defaults {
             else { Set-RegTweakValue -def $def -value $def.defaultValue | Out-Null }
             continue
         }
+        # A payload pair's Windows default is not necessarily "off": windowed-game
+        # optimizations ship ON, so restoring must write defaultOn - writing 0
+        # would leave the machine changed after a "restore everything" call.
+        if ($def.type -eq 'merge') {
+            Set-RegTweak -def $def -on ([bool]$def.defaultOn)
+            continue
+        }
         Set-RegTweak -def $def -on $false
     }
     $log += "[RESTORE] Advanced tweak catalog ($($script:RegTweaks.Count) tweaks, dropdowns included) reset to Windows defaults."
@@ -3305,7 +3403,7 @@ while ($listener.IsListening) {
                            valueName = $_.valueName
 
                            options = $_.options
-                           value = if ($_.type -eq "enum") { Get-RegTweakValue -def $_ } else { $null }
+                           value = if ($_.type -eq "enum") { Get-RegTweakValue -def $_ } elseif ($_.type -eq "merge") { Get-MergeStringValue -def $_ } else { $null }
                            caution = $_.caution
                            needsVerify = [bool]$_.verify
                            active = (Get-RegTweakState $_) }
